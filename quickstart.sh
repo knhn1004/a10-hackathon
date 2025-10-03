@@ -29,7 +29,7 @@ echo ""
 
 # Install dependencies
 echo "📦 Installing dependencies..."
-poetry install --no-interaction
+poetry install --no-interaction --no-root
 echo ""
 
 # Build Docker image

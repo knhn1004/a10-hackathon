@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Sandbox Observability Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #3b82f6;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border-color: #334155;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            padding: 20px;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-2px);
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .stat-subtext {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .chart-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }
+
+        .chart-wrapper {
+            height: 300px;
+            position: relative;
+        }
+
+        .containers-section {
+            margin-top: 30px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+
+        .container-grid {
+            display: grid;
+            gap: 15px;
+        }
+
+        .container-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .container-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--primary-color);
+        }
+
+        .container-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .container-name {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-running {
+            background-color: rgba(16, 185, 129, 0.2);
+            color: var(--success-color);
+        }
+
+        .status-stopped {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: var(--danger-color);
+        }
+
+        .container-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-bottom: 4px;
+        }
+
+        .metric-value {
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+            transition: width 0.3s ease;
+        }
+
+        .error-message {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid var(--danger-color);
+            color: var(--danger-color);
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .refresh-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: var(--success-color);
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            overflow-y: auto;
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            margin: 50px auto;
+            padding: 30px;
+            max-width: 900px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 2rem;
+            cursor: pointer;
+            padding: 0;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .close-btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .inspect-data {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin-top: 15px;
+        }
+
+        pre {
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>🐳 Code Sandbox Observability</h1>
+        <p class="subtitle">
+            <span class="refresh-indicator"></span>
+            Real-time monitoring • Updated every 2 seconds
+        </p>
+    </div>
+
+    <div id="error-container"></div>
+    <div id="loading" class="loading">Loading dashboard...</div>
+
+    <!-- System Stats -->
+    <div class="stats-grid" id="stats-grid" style="display: none;">
+        <div class="stat-card">
+            <div class="stat-label">Total Containers</div>
+            <div class="stat-value" id="total-containers">0</div>
+            <div class="stat-subtext" id="running-containers">0 running</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Total CPU Usage</div>
+            <div class="stat-value" id="total-cpu">0%</div>
+            <div class="stat-subtext">Across all containers</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Total Memory</div>
+            <div class="stat-value" id="total-memory">0 MB</div>
+            <div class="stat-subtext">Combined usage</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">System Status</div>
+            <div class="stat-value" style="color: var(--success-color);">Healthy</div>
+            <div class="stat-subtext">All systems operational</div>
+        </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-container" id="charts-container" style="display: none;">
+        <div class="chart-card">
+            <div class="chart-title">CPU Usage Over Time</div>
+            <div class="chart-wrapper">
+                <canvas id="cpu-chart"></canvas>
+            </div>
+        </div>
+        <div class="chart-card">
+            <div class="chart-title">Memory Usage Over Time</div>
+            <div class="chart-wrapper">
+                <canvas id="memory-chart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Containers -->
+    <div class="containers-section" id="containers-section" style="display: none;">
+        <h2 class="section-title">Active Containers</h2>
+        <div class="container-grid" id="container-grid"></div>
+    </div>
+
+    <!-- Modal for container details -->
+    <div id="detail-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modal-title">Container Details</h2>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let cpuChart = null;
+        let memoryChart = null;
+        let updateInterval = null;
+
+        // Initialize charts
+        function initCharts() {
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: true,
+                        labels: {
+                            color: '#94a3b8'
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                        },
+                        ticks: {
+                            color: '#94a3b8'
+                        }
+                    },
+                    y: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                        },
+                        ticks: {
+                            color: '#94a3b8'
+                        }
+                    }
+                }
+            };
+
+            // CPU Chart
+            const cpuCtx = document.getElementById('cpu-chart').getContext('2d');
+            cpuChart = new Chart(cpuCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'CPU Usage (%)',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: chartOptions
+            });
+
+            // Memory Chart
+            const memoryCtx = document.getElementById('memory-chart').getContext('2d');
+            memoryChart = new Chart(memoryCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Memory Usage (MB)',
+                        data: [],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: chartOptions
+            });
+        }
+
+        // Fetch and update data
+        async function updateDashboard() {
+            try {
+                // Fetch overview data
+                const response = await fetch('/api/overview');
+                const data = await response.json();
+
+                // Update stats
+                document.getElementById('total-containers').textContent = data.summary.total_containers;
+                document.getElementById('running-containers').textContent =
+                    `${data.summary.running_containers} running`;
+                document.getElementById('total-cpu').textContent =
+                    `${data.summary.total_cpu_percent.toFixed(1)}%`;
+                document.getElementById('total-memory').textContent =
+                    `${data.summary.total_memory_mb.toFixed(0)} MB`;
+
+                // Update charts
+                const systemResponse = await fetch('/api/system?limit=60');
+                const systemData = await systemResponse.json();
+
+                const labels = systemData.metrics.map((m, i) => i);
+                const cpuData = systemData.metrics.map(m => m.total_cpu_percent);
+                const memoryData = systemData.metrics.map(m => m.total_memory_mb);
+
+                cpuChart.data.labels = labels;
+                cpuChart.data.datasets[0].data = cpuData;
+                cpuChart.update('none');
+
+                memoryChart.data.labels = labels;
+                memoryChart.data.datasets[0].data = memoryData;
+                memoryChart.update('none');
+
+                // Update container list
+                updateContainerList(data.containers);
+
+                // Show all sections
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('stats-grid').style.display = 'grid';
+                document.getElementById('charts-container').style.display = 'grid';
+                document.getElementById('containers-section').style.display = 'block';
+
+                // Clear errors
+                document.getElementById('error-container').innerHTML = '';
+
+            } catch (error) {
+                console.error('Error updating dashboard:', error);
+                showError('Failed to fetch data: ' + error.message);
+            }
+        }
+
+        // Update container list
+        function updateContainerList(containers) {
+            const grid = document.getElementById('container-grid');
+            grid.innerHTML = '';
+
+            containers.forEach(container => {
+                const card = document.createElement('div');
+                card.className = 'container-card';
+                card.onclick = () => showContainerDetails(container.id);
+
+                const statusClass = container.status === 'running' ? 'status-running' : 'status-stopped';
+                const uptime = formatUptime(container.uptime);
+
+                card.innerHTML = `
+                    <div class="container-header">
+                        <div class="container-name">${container.name}</div>
+                        <span class="status-badge ${statusClass}">${container.status}</span>
+                    </div>
+                    <div class="container-metrics">
+                        <div class="metric">
+                            <div class="metric-label">CPU Usage</div>
+                            <div class="metric-value">${container.cpu_percent.toFixed(1)}%</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${Math.min(container.cpu_percent, 100)}%"></div>
+                            </div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Memory</div>
+                            <div class="metric-value">${container.memory_usage_mb.toFixed(0)} MB</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${container.memory_percent}%"></div>
+                            </div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">CPU Avg (1m)</div>
+                            <div class="metric-value">${container.cpu_avg_1m.toFixed(1)}%</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Uptime</div>
+                            <div class="metric-value">${uptime}</div>
+                        </div>
+                    </div>
+                `;
+
+                grid.appendChild(card);
+            });
+        }
+
+        // Show container details modal
+        async function showContainerDetails(containerId) {
+            const modal = document.getElementById('detail-modal');
+            const modalBody = document.getElementById('modal-body');
+
+            modalBody.innerHTML = '<div class="loading">Loading container details...</div>';
+            modal.style.display = 'block';
+
+            try {
+                const [inspectResponse, metricsResponse, statsResponse] = await Promise.all([
+                    fetch(`/api/containers/${containerId}/inspect`),
+                    fetch(`/api/containers/${containerId}?limit=60`),
+                    fetch(`/api/containers/${containerId}/stats/summary`)
+                ]);
+
+                const inspectData = await inspectResponse.json();
+                const metricsData = await metricsResponse.json();
+                const statsData = await statsResponse.json();
+
+                document.getElementById('modal-title').textContent =
+                    `Container: ${inspectData.name}`;
+
+                modalBody.innerHTML = `
+                    <div class="stat-card" style="margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">Basic Information</h3>
+                        <p><strong>ID:</strong> ${inspectData.id}</p>
+                        <p><strong>Image:</strong> ${inspectData.image}</p>
+                        <p><strong>Status:</strong> ${inspectData.status}</p>
+                        <p><strong>Created:</strong> ${new Date(inspectData.created).toLocaleString()}</p>
+                        <p><strong>PID:</strong> ${inspectData.pid}</p>
+                    </div>
+
+                    <div class="stat-card" style="margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">Resource Limits</h3>
+                        <p><strong>Memory Limit:</strong> ${(inspectData.memory_limit / 1024 / 1024).toFixed(0)} MB</p>
+                        <p><strong>CPU Quota:</strong> ${inspectData.cpu_quota}</p>
+                        <p><strong>CPU Period:</strong> ${inspectData.cpu_period}</p>
+                    </div>
+
+                    <div class="stat-card" style="margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">Performance Statistics (Last 5 min)</h3>
+                        <p><strong>CPU:</strong> Min: ${statsData.cpu_percent.min}% | Max: ${statsData.cpu_percent.max}% | Avg: ${statsData.cpu_percent.avg}%</p>
+                        <p><strong>Memory:</strong> Min: ${statsData.memory_usage_mb.min} MB | Max: ${statsData.memory_usage_mb.max} MB | Avg: ${statsData.memory_usage_mb.avg} MB</p>
+                        <p><strong>Sample Count:</strong> ${statsData.sample_count}</p>
+                    </div>
+
+                    <div class="stat-card" style="margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">Network</h3>
+                        <p><strong>IP Address:</strong> ${inspectData.ip_address || 'N/A'}</p>
+                        <p><strong>Networks:</strong> ${inspectData.networks.join(', ') || 'None'}</p>
+                        <p><strong>Ports:</strong> ${JSON.stringify(inspectData.ports, null, 2)}</p>
+                    </div>
+
+                    <div class="stat-card">
+                        <h3 style="margin-bottom: 15px;">Full Inspect Data</h3>
+                        <div class="inspect-data">
+                            <pre>${JSON.stringify(inspectData.full_inspect, null, 2)}</pre>
+                        </div>
+                    </div>
+                `;
+
+            } catch (error) {
+                modalBody.innerHTML = `<div class="error-message">Failed to load container details: ${error.message}</div>`;
+            }
+        }
+
+        // Close modal
+        function closeModal() {
+            document.getElementById('detail-modal').style.display = 'none';
+        }
+
+        // Format uptime
+        function formatUptime(seconds) {
+            if (seconds < 60) return `${Math.floor(seconds)}s`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+            if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+            return `${Math.floor(seconds / 86400)}d`;
+        }
+
+        // Show error
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
+        // Initialize
+        window.onload = () => {
+            initCharts();
+            updateDashboard();
+
+            // Update every 2 seconds
+            updateInterval = setInterval(updateDashboard, 2000);
+        };
+
+        // Clean up on unload
+        window.onbeforeunload = () => {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+        };
+
+        // Close modal on outside click
+        window.onclick = (event) => {
+            const modal = document.getElementById('detail-modal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        };
+    </script>
+</body>
+
+</html>

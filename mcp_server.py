@@ -31,6 +31,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# Optional: Import monitoring if available
+try:
+    from monitor import get_monitor
+    MONITORING_ENABLED = True
+except ImportError:
+    MONITORING_ENABLED = False
+    logger.warning("Monitoring module not available - monitoring tools disabled")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -238,7 +246,7 @@ current_session_id = str(uuid.uuid4())
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
-    return [
+    tools = [
         Tool(
             name="create_sandbox",
             description=(
@@ -299,6 +307,49 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
+    
+    # Add monitoring tools if available
+    if MONITORING_ENABLED:
+        tools.extend([
+            Tool(
+                name="inspect_container",
+                description=(
+                    "Get detailed information about a container using Docker inspect. "
+                    "Returns comprehensive metadata including resource limits, network settings, "
+                    "state, configuration, and more. Useful for debugging and monitoring."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "sandbox_id": {
+                            "type": "string",
+                            "description": "The ID of the sandbox to inspect",
+                        }
+                    },
+                    "required": ["sandbox_id"],
+                },
+            ),
+            Tool(
+                name="get_container_metrics",
+                description=(
+                    "Get real-time resource utilization metrics for a container. "
+                    "Returns CPU usage, memory usage, network I/O, and block I/O statistics. "
+                    "Helpful for monitoring performance and resource consumption."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "sandbox_id": {
+                            "type": "string",
+                            "description": "The ID of the sandbox to get metrics for",
+                        }
+                    },
+                    "required": ["sandbox_id"],
+                },
+            ),
+        ])
+    
+    return tools
 
 
 @app.call_tool()
@@ -383,6 +434,79 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             result = await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
             return [TextContent(type="text", text=f"✅ {result['message']}")]
+        
+        elif name == "inspect_container" and MONITORING_ENABLED:
+            sandbox_id = arguments.get("sandbox_id")
+            
+            if not sandbox_id:
+                return [TextContent(type="text", text="❌ Error: sandbox_id is required")]
+            
+            # Verify ownership
+            if sandbox_owners.get(sandbox_id) != current_session_id:
+                return [TextContent(type="text", text="❌ Error: Sandbox not found or access denied")]
+            
+            monitor = get_monitor()
+            details = monitor.get_container_details(sandbox_id)
+            
+            if not details:
+                return [TextContent(type="text", text="❌ Error: Container not found")]
+            
+            output = [
+                f"🔍 Container Inspection: {details['name']}\n",
+                f"📋 Basic Info:",
+                f"  • ID: {details['id']}",
+                f"  • Image: {details['image']}",
+                f"  • Status: {details['status']}",
+                f"  • PID: {details['pid']}",
+                f"  • Created: {details['created']}",
+                f"\n⚙️  Resource Limits:",
+                f"  • Memory: {details['memory_limit'] / 1024 / 1024:.0f} MB",
+                f"  • CPU Quota: {details['cpu_quota']}",
+                f"  • CPU Period: {details['cpu_period']}",
+                f"\n🌐 Network:",
+                f"  • IP: {details['ip_address'] or 'N/A'}",
+                f"  • Networks: {', '.join(details['networks']) or 'None'}",
+                f"\n🏷️  Labels: {details['labels']}",
+            ]
+            
+            return [TextContent(type="text", text="\n".join(output))]
+        
+        elif name == "get_container_metrics" and MONITORING_ENABLED:
+            sandbox_id = arguments.get("sandbox_id")
+            
+            if not sandbox_id:
+                return [TextContent(type="text", text="❌ Error: sandbox_id is required")]
+            
+            # Verify ownership
+            if sandbox_owners.get(sandbox_id) != current_session_id:
+                return [TextContent(type="text", text="❌ Error: Sandbox not found or access denied")]
+            
+            monitor = get_monitor()
+            metrics = monitor.get_container_metrics(sandbox_id, limit=1)
+            
+            if not metrics:
+                return [TextContent(type="text", text="❌ Error: No metrics available. Container may not be running.")]
+            
+            latest = metrics[-1]
+            
+            output = [
+                f"📊 Container Metrics: {latest['name']}\n",
+                f"💻 CPU:",
+                f"  • Current: {latest['cpu_percent']}%",
+                f"\n💾 Memory:",
+                f"  • Usage: {latest['memory_usage_mb']:.1f} MB",
+                f"  • Limit: {latest['memory_limit_mb']:.1f} MB",
+                f"  • Percent: {latest['memory_percent']:.1f}%",
+                f"\n🌐 Network I/O:",
+                f"  • RX: {latest['network_rx_bytes'] / 1024:.1f} KB",
+                f"  • TX: {latest['network_tx_bytes'] / 1024:.1f} KB",
+                f"\n💿 Disk I/O:",
+                f"  • Read: {latest['block_read_bytes'] / 1024:.1f} KB",
+                f"  • Write: {latest['block_write_bytes'] / 1024:.1f} KB",
+                f"\n⏱️  Status: {latest['status']}",
+            ]
+            
+            return [TextContent(type="text", text="\n".join(output))]
 
         else:
             return [TextContent(type="text", text=f"❌ Unknown tool: {name}")]
@@ -399,6 +523,14 @@ async def main():
     logger.info(f"  Image: {IMAGE_NAME}")
     logger.info(f"  Idle Timeout: {IDLE_TIMEOUT}s")
     logger.info(f"  Max Sandboxes: {MAX_SANDBOXES}")
+    logger.info(f"  Monitoring: {'Enabled' if MONITORING_ENABLED else 'Disabled'}")
+
+    # Start monitoring if enabled
+    monitoring_task = None
+    if MONITORING_ENABLED:
+        monitor = get_monitor()
+        monitoring_task = asyncio.create_task(monitor.start_monitoring())
+        logger.info("Container monitoring started")
 
     # Start cleanup task
     cleanup_task = asyncio.create_task(cleanup_idle_sandboxes())
@@ -410,6 +542,8 @@ async def main():
             )
     finally:
         cleanup_task.cancel()
+        if monitoring_task:
+            monitoring_task.cancel()
         logger.info("MCP Server stopped")
 
 
