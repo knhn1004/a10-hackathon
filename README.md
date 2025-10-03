@@ -99,6 +99,32 @@ poetry env info -p
 
 See [MCP_README.md](MCP_README.md) for detailed integration instructions.
 
+### Using with Ollama (Local LLM)
+
+You can also use the MCP server with local Ollama models - **100% local, no external API calls!**
+
+```bash
+# Quick start with demo script
+./demo_ollama.sh
+
+# Or run directly
+poetry run python ollama_mcp_client.py --model llama3.1:latest
+
+# Use a code-specialized model
+poetry run python ollama_mcp_client.py --model codeqwen:latest
+```
+
+**Try asking the model:**
+- "Create a sandbox and calculate fibonacci(10)"
+- "Plot a sine wave from 0 to 2π"
+- "Calculate the mean of [1,2,3,4,5] using numpy"
+
+**Available models** (check with `ollama list`):
+- `llama3.1:latest` (4.7GB) - ⭐ Best general purpose
+- `codeqwen:latest` (4.2GB) - 💻 Specialized in code
+- `mistral:instruct` (4.1GB) - Good instruction following
+- `codellama:13b` (7.4GB) - Larger code model
+
 ## 💡 Usage Examples
 
 ### In Claude Desktop
@@ -203,6 +229,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation, 
 - **[mcp_server.py](mcp_server.py)** - Main MCP server implementation
 - **[sandbox_server.py](sandbox_server.py)** - In-container code execution
 - **[test_mcp_server.py](test_mcp_server.py)** - Test suite
+- **[ollama_mcp_client.py](ollama_mcp_client.py)** - Ollama local LLM client
 
 ## 🙏 Credits
 
