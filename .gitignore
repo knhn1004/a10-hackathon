@@ -79,3 +79,23 @@ logs/
 sandbox_data/
 temp/
 
+# ML Model artifacts (never commit trained models or training data)
+models/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# Training data
+data/
+training_samples.jsonl
+*.jsonl
+
+# Training artifacts (plots, metrics, logs)
+training_artifacts/
+training_history/
+plots/
+metrics/
+

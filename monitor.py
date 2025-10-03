@@ -22,6 +22,15 @@ from datetime import datetime
 import docker
 from docker.models.containers import Container
 
+# Optional ML mining detector
+try:
+    from ml_mining_detector import MiningDetectorML
+
+    ML_DETECTOR_AVAILABLE = True
+except ImportError:
+    ML_DETECTOR_AVAILABLE = False
+    logging.info("ML mining detector not available (optional)")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monitor")
 
@@ -40,6 +49,34 @@ NETWORK_ANOMALY_THRESHOLD = 5.0  # Flag if rate is 5x above average
 CPU_MINING_THRESHOLD = 85  # Consider mining if CPU > 85% sustained
 CPU_MINING_DURATION = 10  # Kill if sustained high CPU for > 10 seconds
 CPU_MINING_AUTO_KILL = True  # Automatically kill suspected mining containers
+
+# Moderate CPU mining detection (for stealthy mining)
+CPU_MODERATE_THRESHOLD = 50  # Consider potential mining if CPU > 50% sustained
+CPU_MODERATE_DURATION = 30  # Kill if sustained moderate CPU for > 30 seconds
+CPU_MODERATE_AUTO_KILL = True  # Automatically kill suspected moderate mining
+
+# Pattern-based mining detection
+MINING_KEYWORDS = [
+    "nonce",
+    "hash",
+    "mining",
+    "miner",
+    "blockchain",
+    "proof-of-work",
+    "difficulty",
+    "block",
+    "cryptocurrency",
+    "bitcoin",
+    "ethereum",
+    "sha256",
+    "scrypt",
+]
+MINING_PATTERN_THRESHOLD = 3  # Number of keywords to trigger suspicion
+
+# ML mining detection
+ML_MINING_CONFIDENCE_THRESHOLD = 0.85  # Only act on high-confidence predictions
+ML_MINING_AUTO_KILL = True  # Automatically kill ML-detected mining
+ML_MINING_MIN_SAMPLES = 30  # Need at least 30 samples for ML prediction
 
 
 @dataclass
@@ -72,7 +109,7 @@ class ContainerMetrics:
 
     # Timestamps
     timestamp: float
-    
+
     # Network rates (bytes/sec) - calculated fields with defaults
     network_rx_rate: float = 0.0
     network_tx_rate: float = 0.0
@@ -136,6 +173,28 @@ class ContainerMonitor:
         )  # Last 100 network alerts
         self.tracked_containers: Dict[str, Dict] = {}  # Container tracking data
         self.high_cpu_start_times: Dict[str, float] = {}  # Track when high CPU started
+        self.moderate_cpu_start_times: Dict[str, float] = (
+            {}
+        )  # Track when moderate CPU started
+        self.container_log_cache: Dict[str, str] = (
+            {}
+        )  # Cache recent logs for pattern detection
+
+        # ML mining detector (optional)
+        self.ml_detector: Optional["MiningDetectorML"] = None
+        if ML_DETECTOR_AVAILABLE:
+            try:
+                self.ml_detector = MiningDetectorML()
+                if self.ml_detector.model is not None:
+                    logger.info("🤖 ML mining detector loaded successfully")
+                else:
+                    logger.info(
+                        "ML mining detector available but no trained model found"
+                    )
+                    self.ml_detector = None
+            except Exception as e:
+                logger.warning(f"Failed to load ML mining detector: {e}")
+                self.ml_detector = None
 
     async def collect_container_metrics(
         self, container: Container
@@ -147,10 +206,12 @@ class ContainerMonitor:
 
             # Get container stats (non-streaming)
             stats = await asyncio.to_thread(container.stats, stream=False)
-            
+
             # Validate that stats is a dict
             if not isinstance(stats, dict):
-                logger.error(f"Container {container.id[:12]}: stats is not a dict, got {type(stats)}")
+                logger.error(
+                    f"Container {container.id[:12]}: stats is not a dict, got {type(stats)}"
+                )
                 return None
 
             # Parse CPU usage
@@ -170,9 +231,11 @@ class ContainerMonitor:
             networks = stats.get("networks", {})
             # Ensure networks is a dict (it can sometimes be a string or other type)
             if not isinstance(networks, dict):
-                logger.debug(f"Container {container.id[:12]}: networks is not a dict, got {type(networks)}: {networks}")
+                logger.debug(
+                    f"Container {container.id[:12]}: networks is not a dict, got {type(networks)}: {networks}"
+                )
                 networks = {}
-            
+
             network_rx = 0
             network_tx = 0
             for iface_name, iface_data in networks.items():
@@ -180,20 +243,26 @@ class ContainerMonitor:
                     network_rx += iface_data.get("rx_bytes", 0)
                     network_tx += iface_data.get("tx_bytes", 0)
                 else:
-                    logger.debug(f"Container {container.id[:12]}: network interface {iface_name} data is not a dict: {type(iface_data)}")
+                    logger.debug(
+                        f"Container {container.id[:12]}: network interface {iface_name} data is not a dict: {type(iface_data)}"
+                    )
 
             # Parse block I/O
             blkio_stats = stats.get("blkio_stats", {})
             if not isinstance(blkio_stats, dict):
-                logger.debug(f"Container {container.id[:12]}: blkio_stats is not a dict, got {type(blkio_stats)}")
+                logger.debug(
+                    f"Container {container.id[:12]}: blkio_stats is not a dict, got {type(blkio_stats)}"
+                )
                 blkio_stats = {}
             io_service_bytes = blkio_stats.get("io_service_bytes_recursive", [])
             # Ensure io_service_bytes is iterable (it can be None)
             if io_service_bytes is None or not isinstance(io_service_bytes, list):
                 if io_service_bytes is not None:
-                    logger.debug(f"Container {container.id[:12]}: io_service_bytes is not a list, got {type(io_service_bytes)}")
+                    logger.debug(
+                        f"Container {container.id[:12]}: io_service_bytes is not a list, got {type(io_service_bytes)}"
+                    )
                 io_service_bytes = []
-            
+
             block_read = 0
             block_write = 0
             for entry in io_service_bytes:
@@ -205,21 +274,29 @@ class ContainerMonitor:
                     elif op == "Write":
                         block_write += value
                 else:
-                    logger.debug(f"Container {container.id[:12]}: block I/O entry is not a dict: {type(entry)}")
+                    logger.debug(
+                        f"Container {container.id[:12]}: block I/O entry is not a dict: {type(entry)}"
+                    )
 
             # Get container metadata
             attrs = container.attrs
             if not isinstance(attrs, dict):
-                logger.error(f"Container {container.id[:12]}: attrs is not a dict, got {type(attrs)}")
+                logger.error(
+                    f"Container {container.id[:12]}: attrs is not a dict, got {type(attrs)}"
+                )
                 return None
-                
+
             config = attrs.get("Config", {})
             if not isinstance(config, dict):
-                logger.warning(f"Container {container.id[:12]}: Config is not a dict, got {type(config)}")
+                logger.warning(
+                    f"Container {container.id[:12]}: Config is not a dict, got {type(config)}"
+                )
                 config = {}
             network_settings = attrs.get("NetworkSettings", {})
             if not isinstance(network_settings, dict):
-                logger.warning(f"Container {container.id[:12]}: NetworkSettings is not a dict, got {type(network_settings)}")
+                logger.warning(
+                    f"Container {container.id[:12]}: NetworkSettings is not a dict, got {type(network_settings)}"
+                )
                 network_settings = {}
 
             # Parse ports
@@ -227,7 +304,11 @@ class ContainerMonitor:
             port_bindings = network_settings.get("Ports", {})
             if isinstance(port_bindings, dict):
                 for container_port, host_bindings in port_bindings.items():
-                    if host_bindings and isinstance(host_bindings, list) and len(host_bindings) > 0:
+                    if (
+                        host_bindings
+                        and isinstance(host_bindings, list)
+                        and len(host_bindings) > 0
+                    ):
                         if isinstance(host_bindings[0], dict):
                             host_port = host_bindings[0].get("HostPort", "")
                             ports[container_port] = host_port
@@ -266,7 +347,7 @@ class ContainerMonitor:
                 "network_tx_bytes": network_tx,
                 "container_name": container.name,
             }
-            
+
             # Ensure labels is a dict
             labels = config.get("Labels", {})
             if not isinstance(labels, dict):
@@ -301,7 +382,7 @@ class ContainerMonitor:
         """Calculate CPU percentage using Docker stats formula."""
         cpu_stats = stats.get("cpu_stats", {})
         precpu_stats = stats.get("precpu_stats", {})
-        
+
         # Ensure stats are dictionaries
         if not isinstance(cpu_stats, dict):
             cpu_stats = {}
@@ -310,7 +391,7 @@ class ContainerMonitor:
 
         cpu_usage = cpu_stats.get("cpu_usage", {})
         precpu_usage = precpu_stats.get("cpu_usage", {})
-        
+
         # Ensure usage stats are dictionaries
         if not isinstance(cpu_usage, dict):
             cpu_usage = {}
@@ -522,6 +603,95 @@ class ContainerMonitor:
 
         return alerts
 
+    async def _check_log_patterns(
+        self, container_id: str, metrics: ContainerMetrics
+    ) -> Optional[NetworkAlert]:
+        """
+        Check container logs for mining-related patterns.
+
+        This detects mining activity by analyzing log output for
+        common mining terminology and patterns.
+
+        Returns alert if mining patterns detected, None otherwise.
+        """
+        try:
+            # Get recent logs (last 50 lines)
+            container = self.docker_client.containers.get(container_id)
+            logs = await asyncio.to_thread(container.logs, tail=50, timestamps=False)
+            log_text = logs.decode("utf-8", errors="replace").lower()
+
+            # Cache logs for this container
+            self.container_log_cache[container_id] = log_text
+
+            # Count mining-related keywords
+            keyword_matches = []
+            for keyword in MINING_KEYWORDS:
+                if keyword.lower() in log_text:
+                    keyword_matches.append(keyword)
+
+            # Check for repetitive patterns (like "Tried X nonces...")
+            repetitive_pattern = False
+            lines = log_text.split("\n")
+            similar_lines = 0
+            for i in range(len(lines) - 1):
+                if lines[i] and lines[i + 1]:
+                    # Check if consecutive lines are very similar
+                    line1_words = set(lines[i].split())
+                    line2_words = set(lines[i + 1].split())
+                    if line1_words and line2_words:
+                        similarity = len(line1_words & line2_words) / len(
+                            line1_words | line2_words
+                        )
+                        if similarity > 0.7:  # 70% similarity
+                            similar_lines += 1
+
+            if similar_lines > 10:  # Many similar lines = repetitive output
+                repetitive_pattern = True
+
+            # If enough keywords or repetitive patterns detected
+            if len(keyword_matches) >= MINING_PATTERN_THRESHOLD or repetitive_pattern:
+                alert = NetworkAlert(
+                    container_id=container_id,
+                    name=metrics.name,
+                    alert_type="mining_pattern_detected",
+                    severity="critical",
+                    timestamp=time.time(),
+                    details={
+                        "keywords_found": keyword_matches,
+                        "keyword_count": len(keyword_matches),
+                        "repetitive_output": repetitive_pattern,
+                        "cpu_percent": round(metrics.cpu_percent, 2),
+                    },
+                    message=(
+                        f"🚨 MINING PATTERN DETECTED: Container {metrics.name} shows mining indicators! "
+                        f"Keywords found: {', '.join(keyword_matches[:5])}. "
+                        f"{'Repetitive output detected. ' if repetitive_pattern else ''}"
+                        f"CPU: {metrics.cpu_percent:.1f}%"
+                    ),
+                    auto_killed=False,
+                )
+
+                # Auto-kill if enabled
+                if CPU_MINING_AUTO_KILL:
+                    try:
+                        await asyncio.to_thread(container.kill)
+                        alert.auto_killed = True
+                        alert.message += f" 🔪 Container TERMINATED automatically."
+                        logger.error(
+                            f"🔪 TERMINATED container {metrics.name} for suspected mining (pattern detection)"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to kill mining container {container_id}: {e}"
+                        )
+
+                return alert
+
+        except Exception as e:
+            logger.debug(f"Error checking log patterns for {container_id}: {e}")
+
+        return None
+
     async def _check_cpu_mining(
         self, metrics: ContainerMetrics
     ) -> Optional[NetworkAlert]:
@@ -598,6 +768,118 @@ class ContainerMonitor:
                     f"✅ Container {metrics.name} CPU normalized after {duration:.1f}s"
                 )
                 del self.high_cpu_start_times[container_id]
+
+        return None
+
+    async def _check_ml_mining(
+        self, metrics: ContainerMetrics
+    ) -> Optional[NetworkAlert]:
+        """
+        Use ML model to detect mining patterns.
+
+        Analyzes time series features including CPU patterns, memory trends,
+        network activity, and log output to detect mining with high accuracy.
+
+        Returns alert if high-confidence mining detected, None otherwise.
+        """
+        if not self.ml_detector or not self.ml_detector.model:
+            return None
+
+        container_id = metrics.container_id
+        current_time = time.time()
+
+        # Need enough history for ML prediction
+        history = self.metrics_history.get(container_id)
+        if not history or len(history) < ML_MINING_MIN_SAMPLES:
+            return None
+
+        try:
+            # Get recent metrics for ML analysis
+            recent_metrics = list(history)[-ML_MINING_MIN_SAMPLES:]
+            metrics_dicts = [asdict(m) for m in recent_metrics]
+
+            # Get logs for pattern analysis
+            log_text = self.container_log_cache.get(container_id, "")
+
+            # Extract features and predict
+            features = self.ml_detector.extract_features(metrics_dicts, log_text)
+            prediction, confidence = self.ml_detector.predict(features)
+
+            # DEBUG: Log all predictions
+            logger.info(
+                f"🤖 ML Prediction for {metrics.name}: {prediction} "
+                f"(confidence={confidence*100:.1f}%) | "
+                f"CPU mean={features.cpu_mean:.1f}%, "
+                f"sustained_moderate={features.cpu_sustained_moderate:.2f}, "
+                f"repetition={features.output_repetition_score:.3f}"
+            )
+
+            # Act on high-confidence mining OR suspicious predictions (80%+)
+            if (
+                prediction == "mining" and confidence >= ML_MINING_CONFIDENCE_THRESHOLD
+            ) or (prediction == "suspicious" and confidence >= 0.80):
+
+                severity = "critical" if prediction == "mining" else "high"
+                alert_type = (
+                    "ml_mining_detected"
+                    if prediction == "mining"
+                    else "ml_suspicious_detected"
+                )
+
+                alert = NetworkAlert(
+                    container_id=container_id,
+                    name=metrics.name,
+                    alert_type=alert_type,
+                    severity=severity,
+                    timestamp=current_time,
+                    details={
+                        "prediction": prediction,
+                        "confidence": round(confidence, 4),
+                        "cpu_mean": round(features.cpu_mean, 2),
+                        "cpu_sustained_moderate": round(
+                            features.cpu_sustained_moderate, 4
+                        ),
+                        "output_repetition": round(features.output_repetition_score, 4),
+                        "model_type": "RandomForestClassifier",
+                    },
+                    message=(
+                        f"🤖 ML {prediction.upper()} DETECTED: Container {metrics.name} "
+                        f"(confidence: {confidence*100:.1f}%) - "
+                        f"CPU mean: {features.cpu_mean:.1f}%, "
+                        f"Sustained moderate: {features.cpu_sustained_moderate*100:.1f}%, "
+                        f"Output repetition: {features.output_repetition_score:.3f}"
+                    ),
+                    auto_killed=False,
+                )
+
+                # Auto-kill if enabled
+                if ML_MINING_AUTO_KILL:
+                    try:
+                        container = self.docker_client.containers.get(container_id)
+                        await asyncio.to_thread(container.kill)
+                        alert.auto_killed = True
+                        alert.message += " 🔪 Container TERMINATED by ML detector."
+                        logger.error(
+                            f"🔪 TERMINATED container {metrics.name} - ML detected {prediction} "
+                            f"(confidence: {confidence*100:.1f}%)"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to kill ML-detected container: {e}")
+
+                return alert
+
+            # Log medium-confidence suspicious predictions
+            elif (
+                prediction == "mining" or prediction == "suspicious"
+            ) and confidence >= 0.70:
+                logger.warning(
+                    f"⚠️  Suspicious activity in {metrics.name}: "
+                    f"ML prediction={prediction}, confidence={confidence*100:.1f}% "
+                    f"(kill threshold=80.0%)"
+                )
+
+        except Exception as e:
+            logger.debug(f"ML mining detection error for {container_id}: {e}")
 
         return None
 
@@ -732,6 +1014,12 @@ class ContainerMonitor:
 
                     # Check for network anomalies and CPU mining
                     if metrics.status == "running":
+                        # DEBUG: Log that we're checking a running container
+                        if metrics.cpu_percent > 45:
+                            logger.info(
+                                f"🔍 Checking running container: {metrics.name} CPU={metrics.cpu_percent:.1f}%"
+                            )
+
                         # Check network anomalies
                         network_alerts = self._check_network_anomalies(metrics)
                         for alert in network_alerts:
@@ -748,6 +1036,25 @@ class ContainerMonitor:
                         if cpu_mining_alert:
                             self.network_alerts.append(cpu_mining_alert)
                             logger.error(cpu_mining_alert.message)
+
+                        # Collect logs for ML detection
+                        await self._check_log_patterns(metrics.container_id, metrics)
+
+                        # Check ML mining detection (if available and enough history)
+                        if self.ml_detector and self.ml_detector.model:
+                            ml_alert = await self._check_ml_mining(metrics)
+                            if ml_alert:
+                                self.network_alerts.append(ml_alert)
+                                logger.error(ml_alert.message)
+                            elif (
+                                metrics.cpu_percent > 45
+                            ):  # Debug: log when we check high CPU containers
+                                history_len = len(
+                                    self.metrics_history.get(metrics.container_id, [])
+                                )
+                                logger.info(
+                                    f"ML check on {metrics.name}: CPU={metrics.cpu_percent:.1f}%, history={history_len}/{ML_MINING_MIN_SAMPLES}"
+                                )
 
             # Create system metrics
             system_metrics = SystemMetrics(

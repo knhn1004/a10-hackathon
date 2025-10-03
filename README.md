@@ -343,7 +343,35 @@ This allows you to monitor code execution in real-time using standard Docker too
 - ✅ Automatic cleanup of idle sandboxes
 - ✅ Audit logging of all operations
 
-### Crypto Mining Protection
+### Crypto Mining Protection 🤖
+
+**Two-tier detection system:**
+
+#### 1. Machine Learning Detection (NEW!)
+
+Advanced ML-based mining detection using time series classification:
+
+- **19 features** analyzed: CPU patterns, memory trends, network activity, log repetition
+- **95%+ accuracy** with proper training data
+- **Detects stealth mining** running at moderate CPU (e.g., 49% to evade thresholds)
+- **Adaptive** - learns from new examples
+
+**Quick start:**
+```bash
+# Run the complete demo (generates data, trains, shows curves)
+poetry run python demo_ml_detection.py
+
+# Or collect real data and train
+python collect_training_data.py --interactive
+python train_model.py
+python test_mining_model.py --container-id abc123
+```
+
+📖 **ML System README**: [ML_DETECTION_README.md](ML_DETECTION_README.md)  
+📖 **Full guide**: [ML_MINING_DETECTION.md](ML_MINING_DETECTION.md)  
+📖 **Quick start**: [QUICK_START_ML.md](QUICK_START_ML.md)
+
+#### 2. Threshold-Based Detection (Fallback)
 
 Automatic detection and termination of crypto mining activity:
 

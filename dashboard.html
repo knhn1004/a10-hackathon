@@ -315,6 +315,54 @@
             white-space: pre-wrap;
             word-wrap: break-word;
         }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .btn-danger {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-danger:disabled {
+            background: #64748b;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .kill-btn-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .action-buttons {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .success-message {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid var(--success-color);
+            color: var(--success-color);
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
     </style>
 </head>
 
@@ -521,17 +569,19 @@
             containers.forEach(container => {
                 const card = document.createElement('div');
                 card.className = 'container-card';
-                card.onclick = () => showContainerDetails(container.id);
 
                 const statusClass = container.status === 'running' ? 'status-running' : 'status-stopped';
                 const uptime = formatUptime(container.uptime);
 
                 card.innerHTML = `
-                    <div class="container-header">
+                    <div class="container-header" style="cursor: pointer;" onclick="showContainerDetails('${container.id}')">
                         <div class="container-name">${container.name}</div>
-                        <span class="status-badge ${statusClass}">${container.status}</span>
+                        <div class="kill-btn-container">
+                            <span class="status-badge ${statusClass}">${container.status}</span>
+                            ${container.status === 'running' ? `<button class="btn btn-danger" onclick="event.stopPropagation(); killContainer('${container.id}', '${container.name}')" style="padding: 6px 12px; font-size: 0.75rem;">Kill</button>` : ''}
+                        </div>
                     </div>
-                    <div class="container-metrics">
+                    <div class="container-metrics" onclick="showContainerDetails('${container.id}')" style="cursor: pointer;">
                         <div class="metric">
                             <div class="metric-label">CPU Usage</div>
                             <div class="metric-value">${container.cpu_percent.toFixed(1)}%</div>
@@ -583,7 +633,13 @@
                 document.getElementById('modal-title').textContent =
                     `Container: ${inspectData.name}`;
 
+                const killButtonHtml = inspectData.status === 'running' ? 
+                    `<div class="action-buttons">
+                        <button class="btn btn-danger" onclick="killContainer('${containerId}', '${inspectData.name}')">🔪 Kill Container</button>
+                    </div>` : '';
+
                 modalBody.innerHTML = `
+                    ${killButtonHtml}
                     <div class="stat-card" style="margin-bottom: 20px;">
                         <h3 style="margin-bottom: 15px;">Basic Information</h3>
                         <p><strong>ID:</strong> ${inspectData.id}</p>
@@ -632,6 +688,42 @@
             document.getElementById('detail-modal').style.display = 'none';
         }
 
+        // Kill container
+        async function killContainer(containerId, containerName) {
+            // Confirm action
+            if (!confirm(`⚠️ Are you sure you want to kill container "${containerName}"?\n\nThis will immediately terminate the container.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/containers/${containerId}/kill`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to kill container');
+                }
+
+                const result = await response.json();
+                
+                // Show success message
+                showSuccess(`🔪 Container "${containerName}" killed successfully`);
+                
+                // Close modal if open
+                closeModal();
+                
+                // Refresh dashboard
+                setTimeout(() => {
+                    updateDashboard();
+                }, 500);
+
+            } catch (error) {
+                console.error('Error killing container:', error);
+                showError(`Failed to kill container: ${error.message}`);
+            }
+        }
+
         // Format uptime
         function formatUptime(seconds) {
             if (seconds < 60) return `${Math.floor(seconds)}s`;
@@ -644,6 +736,22 @@
         function showError(message) {
             const container = document.getElementById('error-container');
             container.innerHTML = `<div class="error-message">${message}</div>`;
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+
+        // Show success
+        function showSuccess(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="success-message">${message}</div>`;
+            
+            // Auto-hide after 3 seconds
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 3000);
         }
 
         // Initialize

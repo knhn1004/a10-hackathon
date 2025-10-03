@@ -12,6 +12,7 @@ Provides a web-based dashboard for monitoring Docker containers with:
 import asyncio
 import logging
 from typing import Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -24,11 +25,40 @@ from monitor import get_monitor, ContainerMonitor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard")
 
-# Create FastAPI app
+# Global monitor instance
+monitor: Optional[ContainerMonitor] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown."""
+    global monitor
+
+    # Startup: Initialize and start monitoring
+    logger.info("Starting dashboard server on http://0.0.0.0:8080")
+    monitor = get_monitor()
+
+    # Start monitoring in background
+    monitoring_task = asyncio.create_task(monitor.start_monitoring())
+    logger.info("Dashboard server started, monitoring active")
+
+    yield  # Server is running
+
+    # Shutdown: Cancel monitoring
+    logger.info("Shutting down monitoring...")
+    monitoring_task.cancel()
+    try:
+        await monitoring_task
+    except asyncio.CancelledError:
+        pass
+
+
+# Create FastAPI app with lifespan
 app = FastAPI(
     title="Code Sandbox Observability Dashboard",
     description="Real-time monitoring and observability for Docker-based code sandboxes",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS for development
@@ -39,20 +69,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global monitor instance
-monitor: Optional[ContainerMonitor] = None
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Start the monitoring service."""
-    global monitor
-    monitor = get_monitor()
-
-    # Start monitoring in background
-    asyncio.create_task(monitor.start_monitoring())
-    logger.info("Dashboard server started, monitoring active")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -350,6 +366,40 @@ async def get_container_logs(
             "logs": logs,
             "lines": len(logs.split("\n")),
         }
+
+
+@app.post("/api/containers/{container_id}/kill")
+async def kill_container(container_id: str):
+    """
+    Kill/terminate a container.
+
+    Args:
+        container_id: Container ID (short or full)
+    """
+    if not monitor:
+        raise HTTPException(status_code=503, detail="Monitor not initialized")
+
+    try:
+        # Get the container
+        container = monitor.docker_client.containers.get(container_id)
+
+        # Kill the container
+        container.kill()
+
+        logger.info(
+            f"🔪 Container {container.name} ({container_id}) killed via dashboard"
+        )
+
+        return {
+            "success": True,
+            "message": f"Container {container.name} killed successfully",
+            "container_id": container_id,
+        }
+    except Exception as e:
+        logger.error(f"Failed to kill container {container_id}: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to kill container: {str(e)}"
+        )
 
 
 def run_dashboard(host: str = "0.0.0.0", port: int = 8080):
