@@ -147,12 +147,19 @@ class ContainerMonitor:
 
             # Get container stats (non-streaming)
             stats = await asyncio.to_thread(container.stats, stream=False)
+            
+            # Validate that stats is a dict
+            if not isinstance(stats, dict):
+                logger.error(f"Container {container.id[:12]}: stats is not a dict, got {type(stats)}")
+                return None
 
             # Parse CPU usage
             cpu_percent = self._calculate_cpu_percent(container.id, stats)
 
             # Parse memory usage
             memory_stats = stats.get("memory_stats", {})
+            if not isinstance(memory_stats, dict):
+                memory_stats = {}
             memory_usage = memory_stats.get("usage", 0)
             memory_limit = memory_stats.get("limit", 1)
             memory_percent = (
@@ -161,35 +168,69 @@ class ContainerMonitor:
 
             # Parse network I/O
             networks = stats.get("networks", {})
-            network_rx = sum(net.get("rx_bytes", 0) for net in networks.values())
-            network_tx = sum(net.get("tx_bytes", 0) for net in networks.values())
+            # Ensure networks is a dict (it can sometimes be a string or other type)
+            if not isinstance(networks, dict):
+                logger.debug(f"Container {container.id[:12]}: networks is not a dict, got {type(networks)}: {networks}")
+                networks = {}
+            
+            network_rx = 0
+            network_tx = 0
+            for iface_name, iface_data in networks.items():
+                if isinstance(iface_data, dict):
+                    network_rx += iface_data.get("rx_bytes", 0)
+                    network_tx += iface_data.get("tx_bytes", 0)
+                else:
+                    logger.debug(f"Container {container.id[:12]}: network interface {iface_name} data is not a dict: {type(iface_data)}")
 
             # Parse block I/O
             blkio_stats = stats.get("blkio_stats", {})
+            if not isinstance(blkio_stats, dict):
+                logger.debug(f"Container {container.id[:12]}: blkio_stats is not a dict, got {type(blkio_stats)}")
+                blkio_stats = {}
             io_service_bytes = blkio_stats.get("io_service_bytes_recursive", [])
-            block_read = sum(
-                entry.get("value", 0)
-                for entry in io_service_bytes
-                if entry.get("op") == "Read"
-            )
-            block_write = sum(
-                entry.get("value", 0)
-                for entry in io_service_bytes
-                if entry.get("op") == "Write"
-            )
+            # Ensure io_service_bytes is iterable (it can be None)
+            if io_service_bytes is None or not isinstance(io_service_bytes, list):
+                if io_service_bytes is not None:
+                    logger.debug(f"Container {container.id[:12]}: io_service_bytes is not a list, got {type(io_service_bytes)}")
+                io_service_bytes = []
+            
+            block_read = 0
+            block_write = 0
+            for entry in io_service_bytes:
+                if isinstance(entry, dict):
+                    op = entry.get("op")
+                    value = entry.get("value", 0)
+                    if op == "Read":
+                        block_read += value
+                    elif op == "Write":
+                        block_write += value
+                else:
+                    logger.debug(f"Container {container.id[:12]}: block I/O entry is not a dict: {type(entry)}")
 
             # Get container metadata
             attrs = container.attrs
+            if not isinstance(attrs, dict):
+                logger.error(f"Container {container.id[:12]}: attrs is not a dict, got {type(attrs)}")
+                return None
+                
             config = attrs.get("Config", {})
+            if not isinstance(config, dict):
+                logger.warning(f"Container {container.id[:12]}: Config is not a dict, got {type(config)}")
+                config = {}
             network_settings = attrs.get("NetworkSettings", {})
+            if not isinstance(network_settings, dict):
+                logger.warning(f"Container {container.id[:12]}: NetworkSettings is not a dict, got {type(network_settings)}")
+                network_settings = {}
 
             # Parse ports
             ports = {}
             port_bindings = network_settings.get("Ports", {})
-            for container_port, host_bindings in port_bindings.items():
-                if host_bindings:
-                    host_port = host_bindings[0].get("HostPort", "")
-                    ports[container_port] = host_port
+            if isinstance(port_bindings, dict):
+                for container_port, host_bindings in port_bindings.items():
+                    if host_bindings and isinstance(host_bindings, list) and len(host_bindings) > 0:
+                        if isinstance(host_bindings[0], dict):
+                            host_port = host_bindings[0].get("HostPort", "")
+                            ports[container_port] = host_port
 
             # Parse creation time
             created_str = attrs.get("Created", "")
@@ -207,14 +248,16 @@ class ContainerMonitor:
             container_id_short = container.id[:12]
             if container_id_short in self.tracked_containers:
                 prev_data = self.tracked_containers[container_id_short]
-                time_delta = current_time - prev_data.get("last_time", current_time)
+                # Ensure prev_data is a dict (it might be a string from detect_crashes)
+                if isinstance(prev_data, dict):
+                    time_delta = current_time - prev_data.get("last_time", current_time)
 
-                if time_delta > 0:
-                    prev_rx = prev_data.get("network_rx_bytes", 0)
-                    prev_tx = prev_data.get("network_tx_bytes", 0)
+                    if time_delta > 0:
+                        prev_rx = prev_data.get("network_rx_bytes", 0)
+                        prev_tx = prev_data.get("network_tx_bytes", 0)
 
-                    network_rx_rate = (network_rx - prev_rx) / time_delta
-                    network_tx_rate = (network_tx - prev_tx) / time_delta
+                        network_rx_rate = (network_rx - prev_rx) / time_delta
+                        network_tx_rate = (network_tx - prev_tx) / time_delta
 
             # Update tracked data
             self.tracked_containers[container_id_short] = {
@@ -223,6 +266,11 @@ class ContainerMonitor:
                 "network_tx_bytes": network_tx,
                 "container_name": container.name,
             }
+            
+            # Ensure labels is a dict
+            labels = config.get("Labels", {})
+            if not isinstance(labels, dict):
+                labels = {}
 
             return ContainerMetrics(
                 container_id=container_id_short,
@@ -240,7 +288,7 @@ class ContainerMonitor:
                 block_read_bytes=block_read,
                 block_write_bytes=block_write,
                 image=config.get("Image", "unknown"),
-                labels=config.get("Labels", {}),
+                labels=labels,
                 ports=ports,
                 timestamp=current_time,
             )
@@ -253,9 +301,21 @@ class ContainerMonitor:
         """Calculate CPU percentage using Docker stats formula."""
         cpu_stats = stats.get("cpu_stats", {})
         precpu_stats = stats.get("precpu_stats", {})
+        
+        # Ensure stats are dictionaries
+        if not isinstance(cpu_stats, dict):
+            cpu_stats = {}
+        if not isinstance(precpu_stats, dict):
+            precpu_stats = {}
 
         cpu_usage = cpu_stats.get("cpu_usage", {})
         precpu_usage = precpu_stats.get("cpu_usage", {})
+        
+        # Ensure usage stats are dictionaries
+        if not isinstance(cpu_usage, dict):
+            cpu_usage = {}
+        if not isinstance(precpu_usage, dict):
+            precpu_usage = {}
 
         cpu_total = cpu_usage.get("total_usage", 0)
         precpu_total = precpu_usage.get("total_usage", 0)
