@@ -78,6 +78,14 @@ ML_MINING_CONFIDENCE_THRESHOLD = 0.85  # Only act on high-confidence predictions
 ML_MINING_AUTO_KILL = True  # Automatically kill ML-detected mining
 ML_MINING_MIN_SAMPLES = 30  # Need at least 30 samples for ML prediction
 
+# Container execution time limits
+# API timeout is 30s, so containers running beyond 2 minutes are either:
+# - Stuck in infinite loops
+# - Doing unauthorized work (mining, etc.)
+# - Failed to respond but kept running
+MAX_CONTAINER_RUNTIME = 120  # Kill containers running longer than 2 minutes
+RUNTIME_CHECK_ENABLED = True  # Automatically kill long-running containers
+
 
 @dataclass
 class ContainerMetrics:
@@ -121,8 +129,8 @@ class NetworkAlert:
 
     container_id: str
     name: str
-    alert_type: str  # "high_rate", "high_total", "anomaly", "crypto_mining_pattern", "cpu_mining"
-    severity: str  # "warning", "critical"
+    alert_type: str  # "high_rate", "high_total", "anomaly", "crypto_mining_pattern", "cpu_mining", "long_running_container", "ml_mining_detected", "ml_suspicious_detected"
+    severity: str  # "warning", "critical", "high"
     timestamp: float
     details: Dict[str, any]
     message: str
@@ -883,6 +891,64 @@ class ContainerMonitor:
 
         return None
 
+    async def _check_long_running_containers(
+        self, metrics: ContainerMetrics
+    ) -> Optional[NetworkAlert]:
+        """
+        Check for containers that have been running for too long.
+
+        Containers shouldn't run indefinitely - API timeout is 30s, so
+        anything running beyond 2 minutes is likely stuck or doing something malicious.
+
+        Returns alert if container killed, None otherwise.
+        """
+        if not RUNTIME_CHECK_ENABLED:
+            return None
+
+        current_time = time.time()
+        container_id = metrics.container_id
+
+        # Calculate how long container has been running
+        runtime = current_time - metrics.created_at
+
+        # Check if it's been running too long
+        if runtime > MAX_CONTAINER_RUNTIME:
+            alert = NetworkAlert(
+                container_id=container_id,
+                name=metrics.name,
+                alert_type="long_running_container",
+                severity="critical",
+                timestamp=current_time,
+                details={
+                    "runtime_seconds": round(runtime, 1),
+                    "max_runtime": MAX_CONTAINER_RUNTIME,
+                    "created_at": metrics.created_at,
+                },
+                message=(
+                    f"⏰ LONG-RUNNING CONTAINER: {metrics.name} has been running for "
+                    f"{runtime/60:.1f} minutes (max: {MAX_CONTAINER_RUNTIME/60:.1f} min) - "
+                    f"Likely stuck or doing unauthorized work!"
+                ),
+                auto_killed=False,
+            )
+
+            # Auto-kill the container
+            try:
+                container = self.docker_client.containers.get(container_id)
+                await asyncio.to_thread(container.kill)
+                alert.auto_killed = True
+                alert.message += f" 🔪 Container TERMINATED automatically."
+                logger.error(
+                    f"🔪 TERMINATED long-running container {metrics.name} "
+                    f"(ran for {runtime/60:.1f} minutes)"
+                )
+            except Exception as e:
+                logger.error(f"Failed to kill long-running container {container_id}: {e}")
+
+            return alert
+
+        return None
+
     async def _collect_crash_info(
         self, container: Container
     ) -> Optional[ContainerCrash]:
@@ -1019,6 +1085,13 @@ class ContainerMonitor:
                             logger.info(
                                 f"🔍 Checking running container: {metrics.name} CPU={metrics.cpu_percent:.1f}%"
                             )
+
+                        # Check if container has been running too long
+                        runtime_alert = await self._check_long_running_containers(metrics)
+                        if runtime_alert:
+                            self.network_alerts.append(runtime_alert)
+                            logger.error(runtime_alert.message)
+                            continue  # Skip other checks if we're killing it
 
                         # Check network anomalies
                         network_alerts = self._check_network_anomalies(metrics)
