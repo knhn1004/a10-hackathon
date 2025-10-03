@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "code-sandbox"
+version = "0.1.0"
+description = "Simplified code sandbox for LLM/AI agents"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.109.0"
+uvicorn = {extras = ["standard"], version = "^0.27.0"}
+docker = "^7.0.0"
+httpx = "^0.27.0"
+matplotlib = "^3.8.2"
+numpy = "^1.26.0"
+pandas = "^2.2.0"
+mcp = "^1.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
