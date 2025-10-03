@@ -15,14 +15,15 @@ Perfect for when you want Claude to perform calculations, data analysis, or crea
 
 ## 📋 Available Tools
 
-The MCP server exposes 6 tools to Claude:
+The MCP server exposes 7 tools to Claude:
 
 1. **`create_sandbox`** - Create a new isolated Python environment
 2. **`execute_python`** - Run Python code (with numpy, pandas, matplotlib)
-3. **`list_sandboxes`** - See active execution environments
-4. **`delete_sandbox`** - Clean up resources
-5. **`inspect_container`** - Get detailed container information (Docker inspect)
-6. **`get_container_metrics`** - Get real-time resource utilization metrics
+3. **`execute_from_url`** - Fetch code from a URL and execute it ⭐ NEW
+4. **`list_sandboxes`** - See active execution environments
+5. **`delete_sandbox`** - Clean up resources
+6. **`inspect_container`** - Get detailed container information (Docker inspect)
+7. **`get_container_metrics`** - Get real-time resource utilization metrics
 
 ## Architecture
 
@@ -46,6 +47,8 @@ Claude Desktop → MCP Server → Docker Containers → Code Execution
 - ✅ **Audit Logging** - All operations logged
 - ✅ **Observability** - Real-time monitoring with Docker stats/inspect
 - ✅ **Web Dashboard** - Beautiful visualization of container metrics
+- ✅ **Crash Handling** - Automatic crash detection with logs and recovery
+- ✅ **Error Recovery** - Detailed crash reports with troubleshooting tips
 
 ## 🚀 Quick Start
 
@@ -127,6 +130,67 @@ The dashboard shows:
 - 📉 Resource utilization trends
 
 See [OBSERVABILITY.md](OBSERVABILITY.md) for detailed documentation.
+
+### Crash Handling
+
+When containers crash (OOM, segfault, etc.), the system automatically:
+
+```bash
+# Crashes are detected in real-time
+🔥 Container crash detected
+   → Collects exit code, logs (stdout/stderr separated), metrics
+   → Stores in crash history
+   → Notifies dashboard
+   → Returns detailed error to MCP caller
+   → Cleans up removed containers from dashboard
+```
+
+**Features:**
+- Automatic crash detection (OOM, SIGKILL, SEGFAULT)
+- **Separate stdout/stderr stream collection**
+- Container log capture (last 100 lines per stream)
+- **Automatic dashboard cleanup of removed containers**
+- Crash history API
+- Troubleshooting tips in error messages
+- Dashboard crash visualization
+
+**Test crash handling:**
+```bash
+# Test crash detection and handling
+poetry run python test_crash_handling.py
+
+# Test stream separation and cleanup
+poetry run python test_stream_separation.py
+```
+
+See [CRASH_HANDLING.md](CRASH_HANDLING.md) for detailed documentation.
+
+### URL-Based Code Execution ⭐ NEW
+
+Execute code directly from URLs (GitHub gists, pastebin, etc.):
+
+```
+User: "Run this gist: https://gist.githubusercontent.com/user/abc/raw/code.py"
+
+Claude:
+1. create_sandbox() → sandbox_id: xyz
+2. execute_from_url(sandbox_id, url) → executes code
+
+📥 Fetched code from: https://gist.githubusercontent.com/...
+   Size: 256 bytes
+   
+📊 Execution Status: success
+📝 Output: [results here]
+```
+
+**Features:**
+- Fetch from GitHub gists, pastebin, direct URLs
+- Security validation (blocks localhost, private IPs)
+- Size limit: 1MB max
+- Timeout: 10 seconds
+- Full sandbox isolation
+
+See [URL_EXECUTION.md](URL_EXECUTION.md) for detailed documentation.
 
 ### Using with Ollama (Local LLM)
 
@@ -219,32 +283,105 @@ Customize behavior via environment variables in your Claude Desktop config:
 
 **Configuration Options:**
 
-- `SANDBOX_IMAGE` - Docker image name (default: `code-sandbox:latest`)
+- ****`SANDBOX_IMAGE`**** - Docker image name (default: `code-sandbox:latest`)
 - `SANDBOX_TIMEOUT` - Idle timeout in seconds (default: `300` = 5 minutes)
 - `MAX_SANDBOXES` - Maximum sandboxes per session (default: `10`)
 
 **Resource Limits** (edit `mcp_server.py`):
 
-- Memory: 512MB per sandbox
+- Memory: 512MB per sandbox (with swap disabled)
 - CPU: 50% of one core per sandbox
+- PIDs: 100 processes max (prevents fork bombs)
 - Network: Isolated bridge network
+
+### Docker Logs Monitoring
+
+All executed code output is mirrored to Docker container logs for debugging and monitoring:
+
+```bash
+# Watch logs in real-time
+docker logs -f <container_id>
+
+# View last 50 lines
+docker logs --tail 50 <container_id>
+```
+
+**Log Format:**
+- `[STDOUT]` prefix for standard output
+- `[STDERR]` prefix for error output
+- `[CODE EXECUTION START]` / `[CODE EXECUTION COMPLETE]` markers
+- `[CODE EXECUTION ERROR]` with full tracebacks
+- `[IMAGE]` notifications for matplotlib plot generation
+
+**Example:**
+```
+============================================================
+[CODE EXECUTION START]
+============================================================
+[STDOUT] Hello from Python!
+[STDOUT] Result: 42
+[STDERR] Warning: deprecation notice
+============================================================
+[CODE EXECUTION COMPLETE]
+============================================================
+```
+
+This allows you to monitor code execution in real-time using standard Docker tools, independent of the API response.
 
 ## 🔒 Security
 
 **Implemented:**
 
 - ✅ Docker container isolation per sandbox
-- ✅ Resource limits (CPU, memory) enforced
+- ✅ Resource limits (CPU, memory, PIDs) enforced
+- ✅ **Fork bomb protection** (PID limit: 100)
+- ✅ **Crypto mining protection** (auto-kill on detection)
+- ✅ Network monitoring and anomaly detection
 - ✅ Network isolation (bridge mode)
 - ✅ Security hardening (`no-new-privileges`)
 - ✅ Session-based ownership
 - ✅ Automatic cleanup of idle sandboxes
 - ✅ Audit logging of all operations
 
+### Crypto Mining Protection
+
+Automatic detection and termination of crypto mining activity:
+
+**Detection:**
+- 🚨 **CPU Mining**: Sustained CPU > 85% for 10+ seconds → **AUTO-KILL**
+- ⚠️ **Network Mining**: High CPU + network usage → Alert
+- 📊 **Anomaly Detection**: Unusual resource spikes → Alert
+
+**Example of detected mining:**
+```python
+import hashlib
+
+# This code will be detected and terminated
+nonce = 0
+while True:
+    hash_output = hashlib.sha256(f"block{nonce}".encode()).hexdigest()
+    nonce += 1  # High sustained CPU = Mining detected → Container killed
+```
+
+**Monitoring:**
+- Real-time metrics (CPU, memory, network)
+- Historical analysis (detect anomalies)
+- Alert system (critical events logged)
+- Dashboard visualization
+
+**API Endpoints:**
+```bash
+GET /api/alerts                      # All security alerts
+GET /api/alerts/critical             # Critical alerts only
+GET /api/containers/{id}/alerts      # Per-container alerts
+```
+
+See [MINING_PROTECTION.md](MINING_PROTECTION.md) for detailed documentation.
+
 **For Production, Add:**
 
 - [ ] gVisor or Firecracker for VM-level isolation
-- [ ] Network egress filtering
+- [ ] Network egress filtering (block mining pools)
 - [ ] Authentication & authorization
 - [ ] Per-user rate limiting
 - [ ] Secrets management (HashiCorp Vault)
@@ -262,6 +399,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation, 
 - **[MCP_README.md](MCP_README.md)** - Full MCP server documentation
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Architecture deep dive
 - **[OBSERVABILITY.md](OBSERVABILITY.md)** - Monitoring and dashboard guide
+- **[CRASH_HANDLING.md](CRASH_HANDLING.md)** - Crash detection and recovery guide
+- **[FORK_BOMB_PROTECTION.md](FORK_BOMB_PROTECTION.md)** - Fork bomb protection guide
+- **[MINING_PROTECTION.md](MINING_PROTECTION.md)** - Crypto mining detection and prevention
+- **[URL_EXECUTION.md](URL_EXECUTION.md)** - URL-based code execution guide
+- **[DOCKER_LOGS_MIRRORING.md](DOCKER_LOGS_MIRRORING.md)** - Docker logs monitoring guide
 - **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)** - File organization and metrics
 - **[claude_desktop_config.example.json](claude_desktop_config.example.json)** - Example Claude config
 

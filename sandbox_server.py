@@ -17,6 +17,39 @@ matplotlib.use("Agg")  # Non-interactive backend
 app = FastAPI()
 
 
+class TeeIO:
+    """Tee output to both capture buffer and original stream (for Docker logs)."""
+
+    def __init__(self, capture_buffer, original_stream, prefix=""):
+        self.capture_buffer = capture_buffer
+        self.original_stream = original_stream
+        self.prefix = prefix
+
+    def write(self, message):
+        """Write to both buffer and original stream."""
+        # Write to capture buffer
+        self.capture_buffer.write(message)
+
+        # Also write to original stream (visible in docker logs)
+        if message:  # Only write non-empty messages
+            if self.prefix:
+                self.original_stream.write(f"{self.prefix}{message}")
+            else:
+                self.original_stream.write(message)
+            self.original_stream.flush()
+
+        return len(message)
+
+    def flush(self):
+        """Flush both streams."""
+        self.capture_buffer.flush()
+        self.original_stream.flush()
+
+    def getvalue(self):
+        """Get value from capture buffer."""
+        return self.capture_buffer.getvalue()
+
+
 class ExecuteRequest(BaseModel):
     code: str
 
@@ -38,18 +71,31 @@ async def execute_code(request: ExecuteRequest):
 
     results = []
 
-    # Capture stdout
+    # Save original streams
     old_stdout = sys.stdout
     old_stderr = sys.stderr
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
+
+    # Create capture buffers
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+
+    # Create Tee objects that write to both buffer AND Docker stdout
+    stdout_tee = TeeIO(stdout_buffer, old_stdout, prefix="[STDOUT] ")
+    stderr_tee = TeeIO(stderr_buffer, old_stderr, prefix="[STDERR] ")
 
     # Store for capturing matplotlib figures
     captured_figures = []
 
     try:
-        sys.stdout = stdout_capture
-        sys.stderr = stderr_capture
+        # Redirect to tee streams
+        sys.stdout = stdout_tee
+        sys.stderr = stderr_tee
+
+        # Log code execution start to Docker logs
+        old_stdout.write(f"\n{'='*60}\n")
+        old_stdout.write("[CODE EXECUTION START]\n")
+        old_stdout.write(f"{'='*60}\n")
+        old_stdout.flush()
 
         # Create execution namespace with matplotlib figure capture
         namespace = {
@@ -89,17 +135,28 @@ plt.show = _capture_show
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 
+        # Log execution completion to Docker logs
+        old_stdout.write(f"{'='*60}\n")
+        old_stdout.write("[CODE EXECUTION COMPLETE]\n")
+        old_stdout.write(f"{'='*60}\n\n")
+        old_stdout.flush()
+
         # Collect stdout output
-        stdout_output = stdout_capture.getvalue()
+        stdout_output = stdout_buffer.getvalue()
         if stdout_output:
             results.append({"type": "text", "content": stdout_output})
 
         # Collect any captured matplotlib figures
         for img_data in captured_figures:
             results.append({"type": "image", "content": img_data})
+            # Log image generation to Docker logs
+            old_stdout.write(
+                f"[IMAGE] Generated matplotlib plot ({len(img_data)} bytes)\n"
+            )
+            old_stdout.flush()
 
         # Collect stderr if any
-        stderr_output = stderr_capture.getvalue()
+        stderr_output = stderr_buffer.getvalue()
         if stderr_output:
             results.append({"type": "stderr", "content": stderr_output})
 
@@ -111,6 +168,14 @@ plt.show = _capture_show
 
         # Capture error traceback
         error_trace = traceback.format_exc()
+
+        # Log error to Docker logs
+        old_stdout.write(f"{'='*60}\n")
+        old_stdout.write("[CODE EXECUTION ERROR]\n")
+        old_stdout.write(f"{'='*60}\n")
+        old_stdout.write(f"{error_trace}\n")
+        old_stdout.write(f"{'='*60}\n\n")
+        old_stdout.flush()
 
         results.append({"type": "error", "content": error_trace})
 

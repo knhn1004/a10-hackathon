@@ -24,6 +24,7 @@ import os
 import time
 import uuid
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import docker
 import httpx
@@ -34,6 +35,7 @@ from mcp.types import Tool, TextContent
 # Optional: Import monitoring if available
 try:
     from monitor import get_monitor
+
     MONITORING_ENABLED = True
 except ImportError:
     MONITORING_ENABLED = False
@@ -53,6 +55,17 @@ IDLE_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "300"))  # 5 minutes
 MAX_SANDBOXES = int(os.getenv("MAX_SANDBOXES", "10"))
 CHECK_INTERVAL = 60
 
+# URL fetching configuration
+MAX_CODE_SIZE = 1024 * 1024  # 1MB max code size
+URL_FETCH_TIMEOUT = 10.0  # 10 second timeout for fetching URLs
+ALLOWED_URL_SCHEMES = ["http", "https"]
+ALLOWED_CONTENT_TYPES = [
+    "text/plain",
+    "text/x-python",
+    "application/x-python-code",
+    "application/octet-stream",
+]
+
 # Global state
 docker_client = docker.from_env()
 http_client = httpx.AsyncClient(timeout=30.0)
@@ -62,6 +75,92 @@ sandbox_owners: Dict[str, str] = {}  # sandbox_id -> session_id
 
 class SandboxManager:
     """Manages Docker-based code execution sandboxes."""
+
+    @staticmethod
+    async def fetch_code_from_url(url: str) -> Dict[str, Any]:
+        """
+        Fetch code from a URL with security checks.
+
+        Args:
+            url: URL to fetch code from
+
+        Returns:
+            Dict with code content and metadata
+
+        Raises:
+            ValueError: If URL is invalid or fetch fails
+        """
+        # Validate URL
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ALLOWED_URL_SCHEMES:
+                raise ValueError(
+                    f"Invalid URL scheme: {parsed.scheme}. "
+                    f"Allowed: {', '.join(ALLOWED_URL_SCHEMES)}"
+                )
+
+            # Block localhost and private IPs for security
+            if parsed.hostname in ["localhost", "127.0.0.1", "0.0.0.0"]:
+                raise ValueError("Cannot fetch from localhost URLs")
+
+            # Block private IP ranges (basic check)
+            if parsed.hostname and (
+                parsed.hostname.startswith("192.168.")
+                or parsed.hostname.startswith("10.")
+                or parsed.hostname.startswith("172.16.")
+            ):
+                raise ValueError("Cannot fetch from private IP addresses")
+
+        except Exception as e:
+            raise ValueError(f"Invalid URL: {e}")
+
+        logger.info(f"Fetching code from URL: {url}")
+
+        try:
+            # Fetch with timeout
+            async with httpx.AsyncClient(timeout=URL_FETCH_TIMEOUT) as client:
+                response = await client.get(url, follow_redirects=True)
+
+                if response.status_code != 200:
+                    raise ValueError(
+                        f"Failed to fetch URL: HTTP {response.status_code}"
+                    )
+
+                # Check content type
+                content_type = (
+                    response.headers.get("content-type", "").split(";")[0].strip()
+                )
+                if content_type and content_type not in ALLOWED_CONTENT_TYPES:
+                    logger.warning(
+                        f"Unexpected content-type: {content_type}, proceeding anyway"
+                    )
+
+                # Check size
+                content = response.text
+                if len(content) > MAX_CODE_SIZE:
+                    raise ValueError(
+                        f"Code size exceeds limit: {len(content)} bytes "
+                        f"(max: {MAX_CODE_SIZE})"
+                    )
+
+                if not content.strip():
+                    raise ValueError("URL returned empty content")
+
+                logger.info(f"Successfully fetched {len(content)} bytes from {url}")
+
+                return {
+                    "code": content,
+                    "url": url,
+                    "size": len(content),
+                    "content_type": content_type,
+                }
+
+        except httpx.TimeoutException:
+            raise ValueError(f"Timeout fetching URL (>{URL_FETCH_TIMEOUT}s)")
+        except httpx.RequestError as e:
+            raise ValueError(f"Network error fetching URL: {e}")
+        except Exception as e:
+            raise ValueError(f"Error fetching URL: {e}")
 
     @staticmethod
     async def create_sandbox(session_id: str) -> Dict[str, Any]:
@@ -90,8 +189,10 @@ class SandboxManager:
                 detach=True,
                 ports={f"{SANDBOX_PORT}/tcp": 0},
                 mem_limit="512m",
+                memswap_limit="512m",  # Disable swap
                 cpu_period=100000,
                 cpu_quota=50000,
+                pids_limit=100,  # Limit processes to prevent fork bombs
                 network_mode="bridge",  # Isolated network
                 security_opt=["no-new-privileges"],  # Security hardening
             )
@@ -136,6 +237,11 @@ class SandboxManager:
                 docker_client.containers.get, sandbox_id
             )
 
+            # Check if container is still running
+            await asyncio.to_thread(container.reload)
+            if container.status != "running":
+                raise ValueError(f"Sandbox is not running (status: {container.status})")
+
             ports = container.attrs["NetworkSettings"]["Ports"]
             port_mapping = ports.get(f"{SANDBOX_PORT}/tcp", [])
 
@@ -145,8 +251,25 @@ class SandboxManager:
             host_port = port_mapping[0]["HostPort"]
             sandbox_url = f"http://localhost:{host_port}/execute"
 
-            # Execute code
-            response = await http_client.post(sandbox_url, json={"code": code})
+            # Execute code with timeout
+            try:
+                response = await http_client.post(sandbox_url, json={"code": code})
+            except httpx.TimeoutException:
+                # Check if container crashed
+                await asyncio.to_thread(container.reload)
+                if container.status != "running":
+                    return await SandboxManager._handle_container_crash(
+                        container, sandbox_id, code
+                    )
+                raise ValueError("Execution timeout - code took too long to execute")
+            except httpx.ConnectError:
+                # Container might have crashed
+                await asyncio.to_thread(container.reload)
+                if container.status != "running":
+                    return await SandboxManager._handle_container_crash(
+                        container, sandbox_id, code
+                    )
+                raise ValueError("Cannot connect to sandbox - it may have crashed")
 
             if not response.is_success:
                 raise ValueError(f"Execution failed: {response.text}")
@@ -168,6 +291,113 @@ class SandboxManager:
         except Exception as e:
             logger.error(f"Execution error in sandbox {sandbox_id}: {e}")
             raise
+
+    @staticmethod
+    async def _handle_container_crash(
+        container, sandbox_id: str, code: str
+    ) -> Dict[str, Any]:
+        """Handle container crash and collect information."""
+        logger.error(f"Container {sandbox_id} crashed during execution")
+
+        # Get container inspect data
+        inspect_data = container.attrs
+        state = inspect_data.get("State", {})
+
+        exit_code = state.get("ExitCode", -1)
+        error = state.get("Error", "")
+        oom_killed = state.get("OOMKilled", False)
+
+        # Get container logs with separate stdout/stderr
+        try:
+            stdout = await asyncio.to_thread(
+                container.logs, stdout=True, stderr=False, tail=50, timestamps=True
+            )
+            stderr = await asyncio.to_thread(
+                container.logs, stdout=False, stderr=True, tail=50, timestamps=True
+            )
+
+            stdout_str = stdout.decode("utf-8", errors="replace")
+            stderr_str = stderr.decode("utf-8", errors="replace")
+
+            # Combine for display
+            logs_parts = []
+            if stdout_str.strip():
+                logs_parts.append(f"STDOUT:\n{stdout_str}")
+            if stderr_str.strip():
+                logs_parts.append(f"STDERR:\n{stderr_str}")
+
+            logs_str = "\n\n".join(logs_parts) if logs_parts else "No logs available"
+        except Exception as e:
+            logs_str = f"Failed to retrieve logs: {e}"
+
+        # Determine crash reason
+        crash_reason = "UNKNOWN"
+        if oom_killed:
+            crash_reason = "OUT_OF_MEMORY"
+        elif exit_code == 137:
+            # Check if it was PID limit
+            if "fork" in logs_str.lower() or "process" in logs_str.lower():
+                crash_reason = "PROCESS_LIMIT_EXCEEDED (possible fork bomb)"
+            else:
+                crash_reason = "KILLED (possibly OOM)"
+        elif exit_code == 139:
+            crash_reason = "SEGMENTATION_FAULT"
+
+        # Get crash info from monitor if available
+        crash_details = ""
+        if MONITORING_ENABLED:
+            monitor = get_monitor()
+            crash_info = monitor.get_crash_by_container(sandbox_id)
+            if crash_info:
+                crash_details = (
+                    f"\n\nCrash Details:\n"
+                    f"  Reason: {crash_info['crash_reason']}\n"
+                    f"  Exit Code: {crash_info['exit_code']}\n"
+                    f"  OOM Killed: {crash_info['oom_killed']}"
+                )
+
+        error_message = f"""
+🔥 CONTAINER CRASHED DURING EXECUTION
+
+Crash Reason: {crash_reason}
+Exit Code: {exit_code}
+OOM Killed: {oom_killed}
+{f"Error: {error}" if error else ""}
+{crash_details}
+
+Code that caused the crash:
+{'-' * 60}
+{code[:500]}{'...' if len(code) > 500 else ''}
+{'-' * 60}
+
+Container Logs (last 50 lines):
+{'-' * 60}
+{logs_str}
+{'-' * 60}
+
+Troubleshooting:
+- If OOM: The code used too much memory (limit: 512MB). Try processing smaller datasets.
+- If PROCESS_LIMIT: Too many processes created (limit: 100). Avoid fork bombs and excessive subprocess creation.
+- If SIGKILL: The process was forcefully terminated, usually due to resource limits.
+- If SEGFAULT: The code caused a segmentation fault (memory access error).
+
+Check the observability dashboard for detailed metrics.
+"""
+
+        # Clean up crashed container
+        sandboxes.pop(sandbox_id, None)
+        sandbox_owners.pop(sandbox_id, None)
+
+        return {
+            "status": "crashed",
+            "results": [{"type": "error", "content": error_message}],
+            "crash_info": {
+                "exit_code": exit_code,
+                "oom_killed": oom_killed,
+                "reason": crash_reason,
+                "logs": logs_str,
+            },
+        }
 
     @staticmethod
     async def list_sandboxes(session_id: str) -> list:
@@ -306,49 +536,75 @@ async def list_tools() -> list[Tool]:
                 "required": ["sandbox_id"],
             },
         ),
+        Tool(
+            name="execute_from_url",
+            description=(
+                "Fetch Python code from a URL and execute it in a sandbox. "
+                "This tool will download code from the provided URL and run it in an isolated environment. "
+                "Useful for running code from GitHub gists, pastebin, or other code sharing services. "
+                "The URL must be publicly accessible (http/https). "
+                "Maximum code size: 1MB. You must create a sandbox first using create_sandbox."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sandbox_id": {
+                        "type": "string",
+                        "description": "The ID of the sandbox to execute code in",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "URL to fetch Python code from (must be http/https)",
+                    },
+                },
+                "required": ["sandbox_id", "url"],
+            },
+        ),
     ]
-    
+
     # Add monitoring tools if available
     if MONITORING_ENABLED:
-        tools.extend([
-            Tool(
-                name="inspect_container",
-                description=(
-                    "Get detailed information about a container using Docker inspect. "
-                    "Returns comprehensive metadata including resource limits, network settings, "
-                    "state, configuration, and more. Useful for debugging and monitoring."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "sandbox_id": {
-                            "type": "string",
-                            "description": "The ID of the sandbox to inspect",
-                        }
+        tools.extend(
+            [
+                Tool(
+                    name="inspect_container",
+                    description=(
+                        "Get detailed information about a container using Docker inspect. "
+                        "Returns comprehensive metadata including resource limits, network settings, "
+                        "state, configuration, and more. Useful for debugging and monitoring."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "sandbox_id": {
+                                "type": "string",
+                                "description": "The ID of the sandbox to inspect",
+                            }
+                        },
+                        "required": ["sandbox_id"],
                     },
-                    "required": ["sandbox_id"],
-                },
-            ),
-            Tool(
-                name="get_container_metrics",
-                description=(
-                    "Get real-time resource utilization metrics for a container. "
-                    "Returns CPU usage, memory usage, network I/O, and block I/O statistics. "
-                    "Helpful for monitoring performance and resource consumption."
                 ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "sandbox_id": {
-                            "type": "string",
-                            "description": "The ID of the sandbox to get metrics for",
-                        }
+                Tool(
+                    name="get_container_metrics",
+                    description=(
+                        "Get real-time resource utilization metrics for a container. "
+                        "Returns CPU usage, memory usage, network I/O, and block I/O statistics. "
+                        "Helpful for monitoring performance and resource consumption."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "sandbox_id": {
+                                "type": "string",
+                                "description": "The ID of the sandbox to get metrics for",
+                            }
+                        },
+                        "required": ["sandbox_id"],
                     },
-                    "required": ["sandbox_id"],
-                },
-            ),
-        ])
-    
+                ),
+            ]
+        )
+
     return tools
 
 
@@ -386,6 +642,19 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             # Format results
             output_parts = []
+
+            # Check if container crashed
+            if result.get("status") == "crashed":
+                output_parts.append("🔥 CONTAINER CRASHED 🔥\n")
+                crash_info = result.get("crash_info", {})
+
+                for item in result.get("results", []):
+                    if item["type"] == "error":
+                        output_parts.append(item["content"])
+
+                return [TextContent(type="text", text="\n".join(output_parts))]
+
+            # Normal execution
             output_parts.append(f"📊 Execution Status: {result['status']}\n")
 
             for item in result.get("results", []):
@@ -434,23 +703,100 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             result = await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
             return [TextContent(type="text", text=f"✅ {result['message']}")]
-        
+
+        elif name == "execute_from_url":
+            sandbox_id = arguments.get("sandbox_id")
+            url = arguments.get("url")
+
+            if not sandbox_id or not url:
+                return [
+                    TextContent(
+                        type="text",
+                        text="❌ Error: Both sandbox_id and url are required",
+                    )
+                ]
+
+            # Fetch code from URL
+            try:
+                fetch_result = await SandboxManager.fetch_code_from_url(url)
+                code = fetch_result["code"]
+
+                logger.info(
+                    f"Fetched {fetch_result['size']} bytes from {url}, executing in {sandbox_id}"
+                )
+            except ValueError as e:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"❌ Error fetching code from URL:\n{str(e)}",
+                    )
+                ]
+
+            # Execute the fetched code
+            result = await SandboxManager.execute_code(
+                sandbox_id, code, current_session_id
+            )
+
+            # Format results
+            output_parts = []
+
+            # Add URL information
+            output_parts.append(f"📥 Fetched code from: {url}")
+            output_parts.append(f"   Size: {fetch_result['size']} bytes")
+            output_parts.append(
+                f"   Content-Type: {fetch_result.get('content_type', 'unknown')}\n"
+            )
+
+            # Check if container crashed
+            if result.get("status") == "crashed":
+                output_parts.append("🔥 CONTAINER CRASHED 🔥\n")
+                crash_info = result.get("crash_info", {})
+
+                for item in result.get("results", []):
+                    if item["type"] == "error":
+                        output_parts.append(item["content"])
+
+                return [TextContent(type="text", text="\n".join(output_parts))]
+
+            # Normal execution
+            output_parts.append(f"📊 Execution Status: {result['status']}\n")
+
+            for item in result.get("results", []):
+                if item["type"] == "text":
+                    output_parts.append(f"📝 Output:\n{item['content']}")
+                elif item["type"] == "image":
+                    output_parts.append(
+                        f"🖼️  Generated matplotlib plot (base64 image, {len(item['content'])} chars)"
+                    )
+                elif item["type"] == "error":
+                    output_parts.append(f"❌ Error:\n{item['content']}")
+                elif item["type"] == "stderr":
+                    output_parts.append(f"⚠️  Stderr:\n{item['content']}")
+
+            return [TextContent(type="text", text="\n\n".join(output_parts))]
+
         elif name == "inspect_container" and MONITORING_ENABLED:
             sandbox_id = arguments.get("sandbox_id")
-            
+
             if not sandbox_id:
-                return [TextContent(type="text", text="❌ Error: sandbox_id is required")]
-            
+                return [
+                    TextContent(type="text", text="❌ Error: sandbox_id is required")
+                ]
+
             # Verify ownership
             if sandbox_owners.get(sandbox_id) != current_session_id:
-                return [TextContent(type="text", text="❌ Error: Sandbox not found or access denied")]
-            
+                return [
+                    TextContent(
+                        type="text", text="❌ Error: Sandbox not found or access denied"
+                    )
+                ]
+
             monitor = get_monitor()
             details = monitor.get_container_details(sandbox_id)
-            
+
             if not details:
                 return [TextContent(type="text", text="❌ Error: Container not found")]
-            
+
             output = [
                 f"🔍 Container Inspection: {details['name']}\n",
                 f"📋 Basic Info:",
@@ -468,27 +814,38 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"  • Networks: {', '.join(details['networks']) or 'None'}",
                 f"\n🏷️  Labels: {details['labels']}",
             ]
-            
+
             return [TextContent(type="text", text="\n".join(output))]
-        
+
         elif name == "get_container_metrics" and MONITORING_ENABLED:
             sandbox_id = arguments.get("sandbox_id")
-            
+
             if not sandbox_id:
-                return [TextContent(type="text", text="❌ Error: sandbox_id is required")]
-            
+                return [
+                    TextContent(type="text", text="❌ Error: sandbox_id is required")
+                ]
+
             # Verify ownership
             if sandbox_owners.get(sandbox_id) != current_session_id:
-                return [TextContent(type="text", text="❌ Error: Sandbox not found or access denied")]
-            
+                return [
+                    TextContent(
+                        type="text", text="❌ Error: Sandbox not found or access denied"
+                    )
+                ]
+
             monitor = get_monitor()
             metrics = monitor.get_container_metrics(sandbox_id, limit=1)
-            
+
             if not metrics:
-                return [TextContent(type="text", text="❌ Error: No metrics available. Container may not be running.")]
-            
+                return [
+                    TextContent(
+                        type="text",
+                        text="❌ Error: No metrics available. Container may not be running.",
+                    )
+                ]
+
             latest = metrics[-1]
-            
+
             output = [
                 f"📊 Container Metrics: {latest['name']}\n",
                 f"💻 CPU:",
@@ -505,7 +862,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"  • Write: {latest['block_write_bytes'] / 1024:.1f} KB",
                 f"\n⏱️  Status: {latest['status']}",
             ]
-            
+
             return [TextContent(type="text", text="\n".join(output))]
 
         else:
