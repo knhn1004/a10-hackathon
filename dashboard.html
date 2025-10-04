@@ -445,6 +445,11 @@
             color: var(--success-color);
         }
 
+        .status-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+        }
+
         .status-error {
             background: rgba(239, 68, 68, 0.2);
             color: var(--danger-color);
@@ -1014,39 +1019,78 @@
         };
 
         // Ensure functions are defined at top-level scope
-        // Update ML classifications (history)
+        // Update ML classifications (ALL predictions, not just alerts)
         async function updateMLClassifications() {
             const container = document.getElementById('ml-classifications');
             try {
-                const resp = await fetch('/api/ml/classifications');
-                if (!resp.ok) throw new Error('Alerts not available');
+                const resp = await fetch('/api/ml/predictions?limit=50');
+                if (!resp.ok) throw new Error('Predictions not available');
                 const data = await resp.json();
-                const alerts = (data.alerts || []);
-                if (!alerts.length) {
-                    container.innerHTML = '<div class="loading">No ML classification results yet. Run code to generate activity.</div>';
+                const predictions = (data.predictions || []);
+                if (!predictions.length) {
+                    container.innerHTML = '<div class="loading">No ML predictions yet. Run code for 8+ seconds to generate predictions.</div>';
                     return;
                 }
                 container.innerHTML = '';
-                alerts.slice().reverse().forEach(a => {
-                    const ts = new Date((a.timestamp || Date.now()/1000) * 1000).toLocaleTimeString();
-                    const conf = a.details?.confidence != null ? `${(a.details.confidence*100).toFixed(1)}%` : 'n/a';
-                    const pred = a.details?.prediction || 'unknown';
+                predictions.slice().reverse().forEach((p, idx) => {
+                    const ts = new Date((p.timestamp || Date.now()/1000) * 1000).toLocaleTimeString();
+                    const conf = p.confidence != null ? `${(p.confidence*100).toFixed(1)}%` : 'n/a';
+                    const pred = p.prediction || 'unknown';
+                    const f = p.features || {};
+                    
                     const item = document.createElement('div');
                     item.className = 'request-item';
+                    // Color code by prediction type
+                    let statusClass = 'status-success';
+                    if (pred === 'mining') statusClass = 'status-error';
+                    else if (pred === 'suspicious') statusClass = 'status-warning';
+                    
+                    const featureId = `features-${idx}`;
                     item.innerHTML = `
                         <div class="request-header">
                             <div>
-                                <div class="request-tool">${a.alert_type}</div>
-                                <div class="request-time">${ts} • ${a.name || a.container_id || ''}</div>
+                                <div class="request-tool">${p.name || p.container_id}</div>
+                                <div class="request-time">${ts} • Samples: ${p.samples || 0} • Duration: ${f.execution_duration || 0}s</div>
                             </div>
-                            <span class="request-status ${pred === 'mining' ? 'status-error' : 'status-success'}">${pred}</span>
+                            <span class="request-status ${statusClass}">${pred} (${conf})</span>
                         </div>
-                        <div class="request-preview">Confidence: ${conf}</div>
+                        <div class="request-preview">
+                            💻 CPU: ${(f.cpu_mean || 0).toFixed(1)}% avg, ${(f.cpu_max || 0).toFixed(1)}% max
+                            • 🧠 Mem: ${(f.mem_mean || 0).toFixed(1)} MB avg
+                            • 🌐 Net: ${(f.net_total_bytes || 0).toFixed(0)} bytes
+                            <br>
+                            <a href="#" onclick="document.getElementById('${featureId}').style.display = document.getElementById('${featureId}').style.display === 'none' ? 'block' : 'none'; return false;" style="color: #60a5fa; text-decoration: none; font-size: 0.85rem;">
+                                ▼ Show all 19 features
+                            </a>
+                            <div id="${featureId}" style="display: none; margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px; font-size: 0.8rem; font-family: monospace;">
+                                <strong>CPU Features:</strong><br>
+                                • Mean: ${(f.cpu_mean || 0).toFixed(2)}%, Std: ${(f.cpu_std || 0).toFixed(2)}%, Max: ${(f.cpu_max || 0).toFixed(2)}%, Min: ${(f.cpu_min || 0).toFixed(2)}%<br>
+                                • Trend: ${(f.cpu_trend || 0).toFixed(4)}, Sustained High (>80%): ${((f.cpu_sustained_high || 0)*100).toFixed(1)}%<br>
+                                • Sustained Moderate (>50%): ${((f.cpu_sustained_moderate || 0)*100).toFixed(1)}%<br>
+                                <br>
+                                <strong>Memory Features:</strong><br>
+                                • Mean: ${(f.mem_mean || 0).toFixed(2)} MB, Std: ${(f.mem_std || 0).toFixed(2)} MB<br>
+                                • Trend: ${(f.mem_trend || 0).toFixed(4)}<br>
+                                <br>
+                                <strong>Network Features:</strong><br>
+                                • RX Rate: ${(f.net_rx_rate_mean || 0).toFixed(2)} B/s, TX Rate: ${(f.net_tx_rate_mean || 0).toFixed(2)} B/s<br>
+                                • Total Bytes: ${(f.net_total_bytes || 0).toFixed(0)}, Variance: ${(f.net_variance || 0).toFixed(2)}<br>
+                                <br>
+                                <strong>Block I/O Features:</strong><br>
+                                • Read Rate: ${(f.block_read_rate || 0).toFixed(2)} B/s, Write Rate: ${(f.block_write_rate || 0).toFixed(2)} B/s<br>
+                                <br>
+                                <strong>Temporal Features:</strong><br>
+                                • Execution Duration: ${(f.execution_duration || 0).toFixed(2)}s, Sample Count: ${f.sample_count || 0}<br>
+                                <br>
+                                <strong>Log Analysis:</strong><br>
+                                • Output Repetition Score: ${(f.output_repetition || 0).toFixed(4)}
+                            </div>
+                        </div>
                     `;
                     container.appendChild(item);
                 });
             } catch (e) {
-                container.innerHTML = `<div class="error-message">Failed to load ML classifications: ${e.message}</div>`;
+                container.innerHTML = `<div class="error-message">Failed to load ML predictions: ${e.message}</div>`;
             }
         }
 

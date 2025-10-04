@@ -614,6 +614,20 @@ async def get_ml_classifications(limit: int = 50):
         return {"alerts": [], "count": 0}
 
 
+@app.get("/api/ml/predictions")
+async def get_ml_predictions(limit: int = 100):
+    """Return ALL recent ML predictions (not just alerts above threshold)."""
+    if not monitor:
+        raise HTTPException(status_code=503, detail="Monitor not initialized")
+    
+    try:
+        predictions = monitor.get_ml_predictions(limit=limit)
+        return {"predictions": predictions, "count": len(predictions)}
+    except Exception as e:
+        logger.error(f"Error reading ML predictions: {e}")
+        return {"predictions": [], "count": 0}
+
+
 def run_dashboard(host: str = "0.0.0.0", port: int = 8080):
     """Run the dashboard server."""
     logger.info(f"Starting dashboard server on http://{host}:{port}")

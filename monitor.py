@@ -74,7 +74,7 @@ MINING_KEYWORDS = [
 MINING_PATTERN_THRESHOLD = 3  # Number of keywords to trigger suspicion
 
 # ML mining detection
-ML_MINING_CONFIDENCE_THRESHOLD = 0.85  # Only act on high-confidence predictions
+ML_MINING_CONFIDENCE_THRESHOLD = 0.65  # Lowered for demo (was 0.85)
 ML_MINING_AUTO_KILL = False  # Disable auto-kill for ML-detected mining
 ML_MINING_MIN_SAMPLES = 8  # Lower for quicker demo-classifications
 
@@ -138,6 +138,19 @@ class NetworkAlert:
 
 
 @dataclass
+class MLPrediction:
+    """ML model prediction record (all predictions, not just alerts)."""
+    
+    container_id: str
+    name: str
+    timestamp: float
+    prediction: str  # "mining", "suspicious", "normal"
+    confidence: float
+    features: Dict[str, float]  # CPU, memory, network metrics
+    samples: int  # Number of samples analyzed
+
+
+@dataclass
 class SystemMetrics:
     """System-wide metrics."""
 
@@ -179,6 +192,9 @@ class ContainerMonitor:
         self.network_alerts: Deque[NetworkAlert] = deque(
             maxlen=100
         )  # Last 100 network alerts
+        self.ml_predictions: Deque[MLPrediction] = deque(
+            maxlen=200
+        )  # Last 200 ML predictions (ALL predictions, not just alerts)
         self.tracked_containers: Dict[str, Dict] = {}  # Container tracking data
         self.high_cpu_start_times: Dict[str, float] = {}  # Track when high CPU started
         self.moderate_cpu_start_times: Dict[str, float] = (
@@ -821,11 +837,49 @@ class ContainerMonitor:
                 f"sustained_moderate={features.cpu_sustained_moderate:.2f}, "
                 f"repetition={features.output_repetition_score:.3f}"
             )
+            
+            # Store ALL predictions (not just alerts) for dashboard
+            ml_prediction_record = MLPrediction(
+                container_id=container_id,
+                name=metrics.name,
+                timestamp=current_time,
+                prediction=prediction,
+                confidence=confidence,
+                features={
+                    # CPU features
+                    "cpu_mean": round(features.cpu_mean, 2),
+                    "cpu_std": round(features.cpu_std, 2),
+                    "cpu_max": round(features.cpu_max, 2),
+                    "cpu_min": round(features.cpu_min, 2),
+                    "cpu_trend": round(features.cpu_trend, 4),
+                    "cpu_sustained_high": round(features.cpu_sustained_high, 4),
+                    "cpu_sustained_moderate": round(features.cpu_sustained_moderate, 4),
+                    # Memory features
+                    "mem_mean": round(features.mem_mean, 2),
+                    "mem_std": round(features.mem_std, 2),
+                    "mem_trend": round(features.mem_trend, 4),
+                    # Network features
+                    "net_rx_rate_mean": round(features.net_rx_rate_mean, 2),
+                    "net_tx_rate_mean": round(features.net_tx_rate_mean, 2),
+                    "net_total_bytes": round(features.net_total_bytes, 2),
+                    "net_variance": round(features.net_variance, 2),
+                    # Block I/O features
+                    "block_read_rate": round(features.block_read_rate, 2),
+                    "block_write_rate": round(features.block_write_rate, 2),
+                    # Temporal features
+                    "execution_duration": round(features.execution_duration, 2),
+                    "sample_count": features.sample_count,
+                    # Log analysis
+                    "output_repetition": round(features.output_repetition_score, 4),
+                },
+                samples=len(recent_metrics),
+            )
+            self.ml_predictions.append(ml_prediction_record)
 
-            # Act on high-confidence mining OR suspicious predictions (80%+)
+            # Act on high-confidence mining OR suspicious predictions (65%+)
             if (
                 prediction == "mining" and confidence >= ML_MINING_CONFIDENCE_THRESHOLD
-            ) or (prediction == "suspicious" and confidence >= 0.80):
+            ) or (prediction == "suspicious" and confidence >= 0.65):
 
                 severity = "critical" if prediction == "mining" else "high"
                 alert_type = (
@@ -1045,10 +1099,10 @@ class ContainerMonitor:
     async def collect_all_metrics(self) -> SystemMetrics:
         """Collect metrics from all containers."""
         try:
-            # Get all containers (including stopped ones)
+            # Get ONLY running containers (not stopped/exited ones)
             containers = await asyncio.to_thread(
                 self.docker_client.containers.list,
-                all=True,
+                all=False,  # Only running containers
                 filters={"label": "sandbox=1"},  # Only monitor sandbox containers
             )
 
@@ -1334,6 +1388,11 @@ class ContainerMonitor:
         ]
         recent = critical[-limit:]
         return [asdict(alert) for alert in recent]
+    
+    def get_ml_predictions(self, limit: int = 100) -> List[Dict]:
+        """Get ALL recent ML predictions (not just alerts)."""
+        recent = list(self.ml_predictions)[-limit:]
+        return [asdict(pred) for pred in recent]
 
 
 # Global monitor instance

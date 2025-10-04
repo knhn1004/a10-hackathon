@@ -178,14 +178,23 @@ def log_llm_review(
     from datetime import datetime
 
     try:
-        # Normalize review to dict
-        review_dict = {
-            "decision": getattr(review, "decision", None),
-            "confidence": getattr(review, "confidence", None),
-            "reasons": getattr(review, "reasons", None),
-            "threats_detected": getattr(review, "threats_detected", None),
-            "safe_alternative": getattr(review, "safe_alternative", None),
-        }
+        # Normalize review to dict (handle both objects and dicts)
+        if isinstance(review, dict):
+            review_dict = {
+                "decision": review.get("decision", None),
+                "confidence": review.get("confidence", None),
+                "reasons": review.get("reasons", None),
+                "threats_detected": review.get("threats_detected", None),
+                "safe_alternative": review.get("safe_alternative", None),
+            }
+        else:
+            review_dict = {
+                "decision": getattr(review, "decision", None),
+                "confidence": getattr(review, "confidence", None),
+                "reasons": getattr(review, "reasons", None),
+                "threats_detected": getattr(review, "threats_detected", None),
+                "safe_alternative": getattr(review, "safe_alternative", None),
+            }
 
         entry = {
             "timestamp": time.time(),
@@ -805,7 +814,9 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Create a new isolated Python code execution sandbox. "
                 "Each sandbox is a Docker container with resource limits. "
-                "Use this before executing any code."
+                "IMPORTANT: Sandboxes are automatically deleted after code execution by default. "
+                "Set auto_cleanup=false in execute_python/execute_from_url to keep them alive. "
+                "Idle sandboxes auto-delete after 5 minutes."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
@@ -816,7 +827,10 @@ async def list_tools() -> list[Tool]:
                 "The sandbox has numpy, pandas, matplotlib, and requests available. "
                 "Code execution is isolated and secure. "
                 "Returns stdout, stderr, and any matplotlib plots as base64 images. "
-                "You must create a sandbox first using create_sandbox."
+                "CRITICAL: Unless you need to reuse the sandbox for multiple executions, "
+                "DO NOT set auto_cleanup=false. Leaving containers running wastes resources "
+                "and causes continuous ML monitoring. Default behavior (auto_cleanup=true or omitted) "
+                "automatically deletes the sandbox after execution."
             ),
             inputSchema={
                 "type": "object",
@@ -828,6 +842,10 @@ async def list_tools() -> list[Tool]:
                     "code": {
                         "type": "string",
                         "description": "The Python code to execute",
+                    },
+                    "auto_cleanup": {
+                        "type": "boolean",
+                        "description": "Optional: Set to false ONLY if you need to reuse the sandbox for multiple executions. If omitted or true, sandbox is automatically deleted after execution to prevent resource waste.",
                     },
                 },
                 "required": ["sandbox_id", "code"],
@@ -866,7 +884,9 @@ async def list_tools() -> list[Tool]:
                 "This tool will download code from the provided URL and run it in an isolated environment. "
                 "Useful for running code from GitHub gists, pastebin, or other code sharing services. "
                 "The URL must be publicly accessible (http/https). "
-                "Maximum code size: 1MB. You must create a sandbox first using create_sandbox."
+                "Maximum code size: 1MB. "
+                "IMPORTANT: The sandbox is automatically deleted after execution by default (auto_cleanup=true). "
+                "Set auto_cleanup=false to keep the sandbox alive for reuse."
             ),
             inputSchema={
                 "type": "object",
@@ -878,6 +898,10 @@ async def list_tools() -> list[Tool]:
                     "url": {
                         "type": "string",
                         "description": "URL to fetch Python code from (must be http/https)",
+                    },
+                    "auto_cleanup": {
+                        "type": "boolean",
+                        "description": "Optional: Set to false ONLY if you need to reuse the sandbox for multiple executions. If omitted or true, sandbox is automatically deleted after execution to prevent resource waste.",
                     },
                 },
                 "required": ["sandbox_id", "url"],
@@ -956,6 +980,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "execute_python":
             sandbox_id = arguments.get("sandbox_id")
             code = arguments.get("code")
+            auto_cleanup = arguments.get("auto_cleanup", True)
 
             if not sandbox_id or not code:
                 result_text = "❌ Error: Both sandbox_id and code are required"
@@ -965,6 +990,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = await SandboxManager.execute_code(
                 sandbox_id, code, current_session_id
             )
+            
+            # Auto-cleanup if requested
+            cleanup_message = ""
+            if auto_cleanup and result.get("status") != "crashed":
+                try:
+                    # Trigger final ML analysis before deletion
+                    if MONITORING_ENABLED:
+                        monitor = get_monitor()
+                        logger.info(f"Triggering final ML analysis for {sandbox_id} before deletion...")
+                        try:
+                            # Get the container and do one final metrics collection + analysis
+                            container = await asyncio.to_thread(
+                                docker_client.containers.get, sandbox_id
+                            )
+                            await monitor.collect_container_metrics(container)
+                            logger.info(f"Final ML analysis completed for {sandbox_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to run final ML analysis: {e}")
+                    
+                    await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
+                    cleanup_message = "\n\n🗑️  Sandbox automatically deleted after execution."
+                    logger.info(f"Auto-cleaned up sandbox: {sandbox_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-cleanup sandbox {sandbox_id}: {e}")
+                    cleanup_message = f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
 
             # Format results
             output_parts = []
@@ -1002,10 +1052,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif item["type"] == "stderr":
                     output_parts.append(f"⚠️  Stderr:\n{item['content']}")
 
-            result_text = "\n\n".join(output_parts)
+            result_text = "\n\n".join(output_parts) + cleanup_message
             log_request(
                 name,
-                {"sandbox_id": sandbox_id, "code_length": len(code)},
+                {"sandbox_id": sandbox_id, "code_length": len(code), "auto_cleanup": auto_cleanup},
                 result_text,
                 "success",
             )
@@ -1047,6 +1097,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "execute_from_url":
             sandbox_id = arguments.get("sandbox_id")
             url = arguments.get("url")
+            auto_cleanup = arguments.get("auto_cleanup", True)
 
             if not sandbox_id or not url:
                 return [
@@ -1119,6 +1170,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 )
                 return [TextContent(type="text", text=result_text)]
 
+            # Auto-cleanup if requested
+            cleanup_message = ""
+            if auto_cleanup and result.get("status") != "crashed":
+                try:
+                    # Trigger final ML analysis before deletion
+                    if MONITORING_ENABLED:
+                        monitor = get_monitor()
+                        logger.info(f"Triggering final ML analysis for {sandbox_id} before deletion...")
+                        try:
+                            # Get the container and do one final metrics collection + analysis
+                            container = await asyncio.to_thread(
+                                docker_client.containers.get, sandbox_id
+                            )
+                            await monitor.collect_container_metrics(container)
+                            logger.info(f"Final ML analysis completed for {sandbox_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to run final ML analysis: {e}")
+                    
+                    await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
+                    cleanup_message = "\n\n🗑️  Sandbox automatically deleted after execution."
+                    logger.info(f"Auto-cleaned up sandbox: {sandbox_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-cleanup sandbox {sandbox_id}: {e}")
+                    cleanup_message = f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
+
             # Format results
             output_parts = []
 
@@ -1162,10 +1238,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif item["type"] == "stderr":
                     output_parts.append(f"⚠️  Stderr:\n{item['content']}")
 
-            result_text = "\n\n".join(output_parts)
+            result_text = "\n\n".join(output_parts) + cleanup_message
             log_request(
                 name,
-                {"sandbox_id": sandbox_id, "url": url, "code_length": len(code)},
+                {"sandbox_id": sandbox_id, "url": url, "code_length": len(code), "auto_cleanup": auto_cleanup},
                 result_text,
                 "success",
             )
