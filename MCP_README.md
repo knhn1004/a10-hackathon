@@ -98,7 +98,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "code-sandbox": {
       "command": "/path/to/virtualenv/bin/python",
-      "args": ["/Users/oliver/code/a10-hackathon/mcp_server.py"],
+      "args": ["/path/to/a10-hackathon/mcp_server.py"],
       "env": {
         "SANDBOX_IMAGE": "code-sandbox:latest",
         "SANDBOX_TIMEOUT": "300",
@@ -111,7 +111,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 To find your virtualenv path:
 ```bash
-cd /Users/oliver/code/a10-hackathon
+cd /path/to/a10-hackathon
 poetry env info -p
 # Use: <path>/bin/python
 ```
@@ -121,8 +121,8 @@ poetry env info -p
 {
   "mcpServers": {
     "code-sandbox": {
-      "command": "/Users/oliver/.local/bin/poetry",
-      "args": ["run", "python", "/Users/oliver/code/a10-hackathon/mcp_server.py"],
+      "command": "/path/to/.local/bin/poetry",
+      "args": ["run", "python", "/path/to/a10-hackathon/mcp_server.py"],
       "env": {
         "SANDBOX_IMAGE": "code-sandbox:latest"
       }

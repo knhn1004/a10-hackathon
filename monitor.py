@@ -48,12 +48,12 @@ NETWORK_ANOMALY_THRESHOLD = 5.0  # Flag if rate is 5x above average
 # CPU mining detection thresholds
 CPU_MINING_THRESHOLD = 85  # Consider mining if CPU > 85% sustained
 CPU_MINING_DURATION = 10  # Kill if sustained high CPU for > 10 seconds
-CPU_MINING_AUTO_KILL = True  # Automatically kill suspected mining containers
+CPU_MINING_AUTO_KILL = False  # Disable auto-kill for suspected mining containers
 
 # Moderate CPU mining detection (for stealthy mining)
 CPU_MODERATE_THRESHOLD = 50  # Consider potential mining if CPU > 50% sustained
 CPU_MODERATE_DURATION = 30  # Kill if sustained moderate CPU for > 30 seconds
-CPU_MODERATE_AUTO_KILL = True  # Automatically kill suspected moderate mining
+CPU_MODERATE_AUTO_KILL = False  # Disable auto-kill for suspected moderate mining
 
 # Pattern-based mining detection
 MINING_KEYWORDS = [
@@ -75,8 +75,8 @@ MINING_PATTERN_THRESHOLD = 3  # Number of keywords to trigger suspicion
 
 # ML mining detection
 ML_MINING_CONFIDENCE_THRESHOLD = 0.85  # Only act on high-confidence predictions
-ML_MINING_AUTO_KILL = True  # Automatically kill ML-detected mining
-ML_MINING_MIN_SAMPLES = 30  # Need at least 30 samples for ML prediction
+ML_MINING_AUTO_KILL = False  # Disable auto-kill for ML-detected mining
+ML_MINING_MIN_SAMPLES = 8  # Lower for quicker demo-classifications
 
 # Container execution time limits
 # API timeout is 30s, so containers running beyond 2 minutes are either:
@@ -84,7 +84,7 @@ ML_MINING_MIN_SAMPLES = 30  # Need at least 30 samples for ML prediction
 # - Doing unauthorized work (mining, etc.)
 # - Failed to respond but kept running
 MAX_CONTAINER_RUNTIME = 120  # Kill containers running longer than 2 minutes
-RUNTIME_CHECK_ENABLED = True  # Automatically kill long-running containers
+RUNTIME_CHECK_ENABLED = False  # Disable auto-kill for long-running containers
 
 
 @dataclass

@@ -89,6 +89,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(
     BASE_DIR, "mcp_requests.json"
 )  # Shared file for cross-process access
+LLM_REVIEW_FILE = os.path.join(BASE_DIR, "llm_reviews.json")
+
+llm_review_history: list = []  # Store recent LLM code reviews
 
 
 # Load existing history on startup
@@ -104,6 +107,16 @@ def load_existing_history():
                 logger.info(
                     f"📊 Loaded {len(request_history)} existing MCP requests from history"
                 )
+        # Load LLM reviews history if present
+        if os.path.exists(LLM_REVIEW_FILE):
+            with open(LLM_REVIEW_FILE, "r") as f:
+                _reviews = json.load(f)
+                if isinstance(_reviews, list):
+                    # Keep only last MAX_HISTORY_SIZE
+                    globals()["llm_review_history"] = _reviews[-MAX_HISTORY_SIZE:]
+                    logger.info(
+                        f"🛡️ Loaded {len(llm_review_history)} existing LLM reviews from history"
+                    )
     except Exception as e:
         logger.warning(f"Could not load existing history: {e}")
         request_history = []
@@ -152,6 +165,46 @@ def log_request(tool_name: str, arguments: Dict, result: str, status: str = "suc
         logger.error(f"❌ Failed to save request history to file: {e}")
         logger.error(f"   File path: {os.path.abspath(HISTORY_FILE)}")
         logger.error(f"   Current directory: {os.getcwd()}")
+
+
+def log_llm_review(
+    sandbox_id: str,
+    code_length: int,
+    review: Any,
+    source: str = "execute_code",
+):
+    """Persist LLM code review details for dashboard visualization."""
+    import json
+    from datetime import datetime
+
+    try:
+        # Normalize review to dict
+        review_dict = {
+            "decision": getattr(review, "decision", None),
+            "confidence": getattr(review, "confidence", None),
+            "reasons": getattr(review, "reasons", None),
+            "threats_detected": getattr(review, "threats_detected", None),
+            "safe_alternative": getattr(review, "safe_alternative", None),
+        }
+
+        entry = {
+            "timestamp": time.time(),
+            "datetime": datetime.now().isoformat(),
+            "sandbox_id": sandbox_id,
+            "code_length": code_length,
+            "session_id": current_session_id,
+            "source": source,
+            "review": review_dict,
+        }
+
+        llm_review_history.append(entry)
+        if len(llm_review_history) > MAX_HISTORY_SIZE:
+            llm_review_history.pop(0)
+
+        with open(LLM_REVIEW_FILE, "w") as f:
+            json.dump(llm_review_history, f, indent=2)
+    except Exception as e:
+        logger.debug(f"Failed to log LLM review: {e}")
 
 
 def get_request_history(limit: int = 50) -> list:
@@ -290,7 +343,7 @@ class SandboxManager:
                 memswap_limit="512m",  # Disable swap
                 cpu_period=100000,
                 cpu_quota=50000,
-                pids_limit=100,  # Limit processes to prevent fork bombs
+                # pids_limit disabled to reduce false positives on forking workloads
                 network_mode="bridge",  # Isolated network
                 security_opt=["no-new-privileges"],  # Security hardening
             )
@@ -356,6 +409,11 @@ class SandboxManager:
                             f"   Reasons: {'; '.join(review_result.reasons[:2])}"
                         )  # First 2 reasons
 
+                    # Persist LLM review
+                    log_llm_review(
+                        sandbox_id, len(code), review_result, source="execute_code"
+                    )
+
                     if review_result.decision == "reject":
                         # Code rejected by LLM filter
                         logger.error(
@@ -399,11 +457,53 @@ Reasons:
                     logger.warning(
                         "⚠️ Proceeding with code execution WITHOUT LLM review"
                     )
+                    # Log skipped review due to timeout
+                    log_llm_review(
+                        sandbox_id,
+                        len(code),
+                        {
+                            "decision": "skipped",
+                            "confidence": 0.0,
+                            "reasons": [
+                                "LLM filter timed out (>30s)",
+                            ],
+                            "threats_detected": [],
+                            "safe_alternative": None,
+                        },
+                        source="execute_code",
+                    )
                 except Exception as e:
                     logger.error(f"❌ LLM filter error: {e}")
                     logger.warning(
                         "⚠️ Proceeding with code execution WITHOUT LLM review"
                     )
+                    # Log skipped review due to error
+                    log_llm_review(
+                        sandbox_id,
+                        len(code),
+                        {
+                            "decision": "skipped",
+                            "confidence": 0.0,
+                            "reasons": [f"LLM filter error: {e}"],
+                            "threats_detected": ["review_error"],
+                            "safe_alternative": None,
+                        },
+                        source="execute_code",
+                    )
+            else:
+                # Log skipped review when filter unavailable
+                log_llm_review(
+                    sandbox_id,
+                    len(code),
+                    {
+                        "decision": "skipped",
+                        "confidence": 0.0,
+                        "reasons": ["LLM code filter unavailable"],
+                        "threats_detected": [],
+                        "safe_alternative": None,
+                    },
+                    source="execute_code",
+                )
 
         logger.info(f"Executing code in sandbox: {sandbox_id}")
 

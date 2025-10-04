@@ -22,7 +22,7 @@ Your MCP code sandbox server will be exposed as standard REST API endpoints that
 ### Step 1: Build the Sandbox Docker Image
 
 ```bash
-cd /Users/oliver/code/a10-hackathon
+cd /path/to/a10-hackathon
 docker build -t code-sandbox:latest .
 ```
 

@@ -23,7 +23,7 @@ Use machine learning to detect mining patterns that simple thresholds miss.
 ### 1. Verify ML Dependencies Installed
 
 ```bash
-cd /Users/oliver/code/a10-hackathon
+cd /path/to/a10-hackathon
 poetry add scikit-learn numpy  # Already done!
 ```
 

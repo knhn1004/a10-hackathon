@@ -48,5 +48,6 @@ echo ""
 
 # Run mcpo with the MCP server
 # Using poetry's python to ensure all dependencies are available
-uvx mcpo --port 8000 -- "$PYTHON_PATH" /Users/oliver/code/a10-hackathon/mcp_server.py
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+uvx mcpo --port 8000 -- "$PYTHON_PATH" "$SCRIPT_DIR/mcp_server.py"
 

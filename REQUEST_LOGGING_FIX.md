@@ -91,11 +91,11 @@ INFO:code-sandbox-mcp:Starting Code Sandbox MCP Server
 INFO:code-sandbox-mcp:Configuration:
 INFO:code-sandbox-mcp:  Image: code-sandbox:latest
 INFO:code-sandbox-mcp:  ... other config ...
-INFO:code-sandbox-mcp:  📝 Request History: /Users/oliver/code/a10-hackathon/mcp_requests.json
-INFO:code-sandbox-mcp:  📂 Working Directory: /Users/oliver/code/a10-hackathon
+INFO:code-sandbox-mcp:  📝 Request History: /path/to/a10-hackathon/mcp_requests.json
+INFO:code-sandbox-mcp:  📂 Working Directory: /path/to/a10-hackathon
 
 # When a request is made:
-INFO:code-sandbox-mcp:📝 Logging execute_from_url (crashed) to /Users/oliver/code/a10-hackathon/mcp_requests.json
+INFO:code-sandbox-mcp:📝 Logging execute_from_url (crashed) to /path/to/a10-hackathon/mcp_requests.json
 INFO:code-sandbox-mcp:✅ Logged successfully - total history: 10
 ```
 
@@ -129,10 +129,10 @@ INFO:code-sandbox-mcp:✅ Logged successfully - total history: 10
 ```bash
 $ poetry run python -c "from mcp_server import log_request; ..."
 
-INFO:code-sandbox-mcp:📝 Logging test_tool (success) to /Users/oliver/code/a10-hackathon/mcp_requests.json
+INFO:code-sandbox-mcp:📝 Logging test_tool (success) to /path/to/a10-hackathon/mcp_requests.json
 INFO:code-sandbox-mcp:✅ Logged successfully - total history: 10
 
-✅ History file exists at: /Users/oliver/code/a10-hackathon/mcp_requests.json
+✅ History file exists at: /path/to/a10-hackathon/mcp_requests.json
 ✅ Contains 10 entries
 ✅ Latest entry:
    Tool: test_tool
@@ -166,8 +166,8 @@ Or if it fails:
 
 ```
 ERROR:code-sandbox-mcp:❌ Failed to save request history to file: [Errno 13] Permission denied
-ERROR:code-sandbox-mcp:   File path: /Users/oliver/code/a10-hackathon/mcp_requests.json
-ERROR:code-sandbox-mcp:   Current directory: /Users/oliver/code/a10-hackathon
+ERROR:code-sandbox-mcp:   File path: /path/to/a10-hackathon/mcp_requests.json
+ERROR:code-sandbox-mcp:   Current directory: /path/to/a10-hackathon
 ```
 
 ### Check the History File

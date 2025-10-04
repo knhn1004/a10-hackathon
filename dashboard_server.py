@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import httpx
+import os
+import json
 
 from monitor import get_monitor, ContainerMonitor
 
@@ -495,9 +497,6 @@ async def get_mcp_request_history(limit: int = 50):
     Args:
         limit: Number of recent requests to return (default: 50)
     """
-    import json
-    import os
-
     # Use absolute path relative to this server file to avoid CWD issues
     base_dir = os.path.dirname(os.path.abspath(__file__))
     history_file = os.path.join(base_dir, "mcp_requests.json")
@@ -514,6 +513,105 @@ async def get_mcp_request_history(limit: int = 50):
     except Exception as e:
         logger.error(f"Error reading MCP request history: {e}")
         return {"requests": [], "count": 0}
+
+
+@app.get("/api/ml/model_info")
+async def get_ml_model_info():
+    """Return ML model details (RandomForest) and feature importances if available."""
+    try:
+        model_info = {
+            "model_type": "RandomForestClassifier",
+            "features": [
+                "cpu_mean",
+                "cpu_std",
+                "cpu_max",
+                "cpu_min",
+                "cpu_trend",
+                "cpu_sustained_high",
+                "cpu_sustained_moderate",
+                "mem_mean",
+                "mem_std",
+                "mem_trend",
+                "net_rx_rate_mean",
+                "net_tx_rate_mean",
+                "net_total_bytes",
+                "net_variance",
+                "block_read_rate",
+                "block_write_rate",
+                "execution_duration",
+                "sample_count",
+                "output_repetition_score",
+            ],
+            "feature_importance": None,
+        }
+
+        # Optional: read last training metrics for importances if available
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        metrics_dir = os.path.join(base_dir, "training_artifacts", "metrics")
+        latest_metrics = os.path.join(metrics_dir, "latest_training.json")
+        if os.path.exists(latest_metrics):
+            with open(latest_metrics, "r") as f:
+                data = json.load(f)
+                # New schema stores importance_scores as a map
+                importance_scores = (
+                    data.get("features", {}).get("importance_scores")
+                    if isinstance(data.get("features"), dict)
+                    else None
+                )
+                if importance_scores and isinstance(importance_scores, dict):
+                    # Align scores with the known features list
+                    model_info["feature_importance"] = [
+                        float(importance_scores.get(name, 0.0))
+                        for name in model_info["features"]
+                    ]
+
+        return model_info
+    except Exception as e:
+        logger.error(f"Error loading ML model info: {e}")
+        return {
+            "model_type": "RandomForestClassifier",
+            "features": [],
+            "feature_importance": None,
+        }
+
+
+@app.get("/api/llm/reviews")
+async def get_llm_reviews(limit: int = 20):
+    """Return recent LLM code reviews from file."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        reviews_file = os.path.join(base_dir, "llm_reviews.json")
+
+        if os.path.exists(reviews_file):
+            with open(reviews_file, "r") as f:
+                reviews = json.load(f)
+                recent = list(reversed(reviews[-limit:]))
+                return {"reviews": recent, "count": len(recent)}
+        else:
+            return {"reviews": [], "count": 0}
+    except Exception as e:
+        logger.error(f"Error reading LLM reviews: {e}")
+        return {"reviews": [], "count": 0}
+
+
+@app.get("/api/ml/classifications")
+async def get_ml_classifications(limit: int = 50):
+    """Return recent ML classification alerts only (ML mining/suspicious)."""
+    if not monitor:
+        raise HTTPException(status_code=503, detail="Monitor not initialized")
+
+    try:
+        alerts = monitor.get_network_alerts(limit=limit)
+        # Filter for ML-specific alert types
+        ml_alerts = [
+            a
+            for a in alerts
+            if a.get("alert_type") in ("ml_mining_detected", "ml_suspicious_detected")
+        ]
+        return {"alerts": ml_alerts, "count": len(ml_alerts)}
+    except Exception as e:
+        logger.error(f"Error reading ML classifications: {e}")
+        return {"alerts": [], "count": 0}
 
 
 def run_dashboard(host: str = "0.0.0.0", port: int = 8080):

@@ -99,5 +99,9 @@ training_history/
 plots/
 metrics/
 
-a MCP request history
+# MCP request history
 mcp_requests.json
+llm_reviews.json
+
+# User-specific Claude config
+claude_desktop_config.json

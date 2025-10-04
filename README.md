@@ -93,7 +93,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "code-sandbox": {
       "command": "/path/to/virtualenv/bin/python",
-      "args": ["/Users/oliver/code/a10-hackathon/mcp_server.py"]
+      "args": ["/path/to/a10-hackathon/mcp_server.py"]
     }
   }
 }
@@ -102,7 +102,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 Find your virtualenv path:
 
 ```bash
-cd /Users/oliver/code/a10-hackathon
+cd /path/to/a10-hackathon
 poetry env info -p
 # Use: <output>/bin/python
 ```

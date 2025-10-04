@@ -521,9 +521,11 @@
     </div>
 
     <!-- Tabs -->
-    <div class="tabs" id="tabs" style="display: none;">
+        <div class="tabs" id="tabs" style="display: none;">
         <button class="tab active" onclick="switchTab('containers')">Active Containers</button>
-        <button class="tab" onclick="switchTab('requests')">MCP Requests</button>
+            <button class="tab" onclick="switchTab('requests')">MCP Requests</button>
+            <button class="tab" onclick="switchTab('ml')">ML Model</button>
+            <button class="tab" onclick="switchTab('llm')">LLM Reviews</button>
     </div>
 
     <!-- Tab Contents -->
@@ -539,6 +541,20 @@
             <h2 class="section-title">MCP Function Calls</h2>
             <div id="requests-list"></div>
         </div>
+
+        <!-- ML Model Tab -->
+        <div class="tab-content" id="ml-tab">
+            <h2 class="section-title">ML Classification History</h2>
+            <div id="ml-classifications"></div>
+        </div>
+
+        <!-- LLM Reviews Tab -->
+        <div class="tab-content" id="llm-tab">
+            <h2 class="section-title">Ollama Code Analysis</h2>
+            <div id="llm-reviews-list"></div>
+        </div>
+
+        
     </div>
 
     <!-- Modal for container details -->
@@ -765,6 +781,10 @@
             // Load MCP requests if switching to that tab
             if (tabName === 'requests') {
                 updateMCPRequests();
+            } else if (tabName === 'ml') {
+                updateMLClassifications();
+            } else if (tabName === 'llm') {
+                updateLLMReviews();
             }
         }
 
@@ -975,6 +995,14 @@
                 if (requestsTab && requestsTab.classList.contains('active')) {
                     updateMCPRequests();
                 }
+                const mlTab = document.getElementById('ml-tab');
+                if (mlTab && mlTab.classList.contains('active')) {
+                    updateMLClassifications();
+                }
+                const llmTab = document.getElementById('llm-tab');
+                if (llmTab && llmTab.classList.contains('active')) {
+                    updateLLMReviews();
+                }
             }, 2000);
         };
 
@@ -985,6 +1013,81 @@
             }
         };
 
+        // Ensure functions are defined at top-level scope
+        // Update ML classifications (history)
+        async function updateMLClassifications() {
+            const container = document.getElementById('ml-classifications');
+            try {
+                const resp = await fetch('/api/ml/classifications');
+                if (!resp.ok) throw new Error('Alerts not available');
+                const data = await resp.json();
+                const alerts = (data.alerts || []);
+                if (!alerts.length) {
+                    container.innerHTML = '<div class="loading">No ML classification results yet. Run code to generate activity.</div>';
+                    return;
+                }
+                container.innerHTML = '';
+                alerts.slice().reverse().forEach(a => {
+                    const ts = new Date((a.timestamp || Date.now()/1000) * 1000).toLocaleTimeString();
+                    const conf = a.details?.confidence != null ? `${(a.details.confidence*100).toFixed(1)}%` : 'n/a';
+                    const pred = a.details?.prediction || 'unknown';
+                    const item = document.createElement('div');
+                    item.className = 'request-item';
+                    item.innerHTML = `
+                        <div class="request-header">
+                            <div>
+                                <div class="request-tool">${a.alert_type}</div>
+                                <div class="request-time">${ts} • ${a.name || a.container_id || ''}</div>
+                            </div>
+                            <span class="request-status ${pred === 'mining' ? 'status-error' : 'status-success'}">${pred}</span>
+                        </div>
+                        <div class="request-preview">Confidence: ${conf}</div>
+                    `;
+                    container.appendChild(item);
+                });
+            } catch (e) {
+                container.innerHTML = `<div class="error-message">Failed to load ML classifications: ${e.message}</div>`;
+            }
+        }
+
+        // Update LLM reviews
+        async function updateLLMReviews() {
+            const container = document.getElementById('llm-reviews-list');
+            try {
+                const resp = await fetch('/api/llm/reviews?limit=20');
+                if (!resp.ok) throw new Error('LLM reviews not available');
+                const data = await resp.json();
+                const reviews = data.reviews || [];
+                if (!reviews.length) {
+                    container.innerHTML = '<div class="loading">No LLM reviews yet. Execute code to generate reviews.</div>';
+                    return;
+                }
+                container.innerHTML = '';
+                reviews.forEach(r => {
+                    const ts = new Date(r.timestamp * 1000).toLocaleTimeString();
+                    const decision = r.review?.decision || 'unknown';
+                    const conf = r.review?.confidence != null ? `${(r.review.confidence*100).toFixed(1)}%` : 'n/a';
+                    const threats = (r.review?.threats_detected || []).slice(0,3).join(', ');
+                    const item = document.createElement('div');
+                    item.className = 'request-item';
+                    item.innerHTML = `
+                        <div class="request-header">
+                            <div>
+                                <div class="request-tool">Sandbox: ${r.sandbox_id || 'n/a'}</div>
+                                <div class="request-time">${ts} • code: ${r.code_length || 0} bytes • source: ${r.source || ''}</div>
+                            </div>
+                            <span class="request-status ${decision === 'accept' ? 'status-success' : 'status-error'}">${decision}</span>
+                        </div>
+                        <div class="request-preview">Confidence: ${conf}${threats ? ` • Threats: ${threats}` : ''}</div>
+                    `;
+                    container.appendChild(item);
+                });
+            } catch (e) {
+                container.innerHTML = `<div class="error-message">Failed to load LLM reviews: ${e.message}</div>`;
+            }
+        }
+        
+
         // Close modal on outside click
         window.onclick = (event) => {
             const modal = document.getElementById('detail-modal');
@@ -992,6 +1095,8 @@
                 closeModal();
             }
         };
+
+        
     </script>
 </body>
 

@@ -20,6 +20,7 @@ echo ""
 echo "Starting in 3 seconds..."
 sleep 3
 
-cd /Users/oliver/code/a10-hackathon
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
 poetry run python ollama_mcp_client.py --model llama3.1:latest
 

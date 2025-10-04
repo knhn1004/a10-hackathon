@@ -45,20 +45,20 @@ Full exception tracebacks are now written to Docker logs with clear markers for 
 
 ## Files Modified
 
-### `/Users/oliver/code/a10-hackathon/sandbox_server.py`
+### `sandbox_server.py`
 - Added `TeeIO` class for dual-stream writing
 - Modified `execute_code()` to use `TeeIO` for stdout/stderr
 - Added execution markers and logging statements
 - Enhanced error logging with formatted output
 
-### `/Users/oliver/code/a10-hackathon/README.md`
+### `README.md`
 - Added "Docker Logs Monitoring" section with usage examples
 - Documented log format and prefixes
 - Added example output
 
 ## New Documentation
 
-### `/Users/oliver/code/a10-hackathon/DOCKER_LOGS_MIRRORING.md`
+### `DOCKER_LOGS_MIRRORING.md`
 Comprehensive guide covering:
 - Implementation details
 - Log format specification

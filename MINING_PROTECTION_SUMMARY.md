@@ -123,7 +123,7 @@ NETWORK_ANOMALY_THRESHOLD = 5.0
 
 ## Files Modified
 
-### `/Users/oliver/code/a10-hackathon/monitor.py`
+### `monitor.py`
 
 **Added:**
 - `NetworkAlert` dataclass for alert storage
@@ -140,14 +140,14 @@ NETWORK_ANOMALY_THRESHOLD = 5.0
 - `collect_container_metrics()` - Calculate network rates
 - `collect_all_metrics()` - Call mining detection checks
 
-### `/Users/oliver/code/a10-hackathon/dashboard_server.py`
+### `dashboard_server.py`
 
 **Added:**
 - `GET /api/alerts` - All alerts endpoint
 - `GET /api/alerts/critical` - Critical alerts endpoint
 - `GET /api/containers/{id}/alerts` - Container-specific alerts
 
-### `/Users/oliver/code/a10-hackathon/README.md`
+### `README.md`
 
 **Updated:**
 - Added "Crypto Mining Protection" section to Security
@@ -158,7 +158,7 @@ NETWORK_ANOMALY_THRESHOLD = 5.0
 
 ## New Documentation
 
-### `/Users/oliver/code/a10-hackathon/MINING_PROTECTION.md`
+### `MINING_PROTECTION.md`
 
 Comprehensive guide covering:
 - Detection methods (CPU, network, anomaly)
