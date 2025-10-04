@@ -209,15 +209,15 @@ async def log_request(
         if response.status_code == 200:
             data = response.json()
             request_id = data.get("request_id")
-            logger.debug(
-                f"📝 Logged {tool_name} to database (request_id: {request_id})"
-            )
+            logger.info(f"📝 Logged {tool_name} to database (request_id: {request_id})")
             return request_id
         else:
-            logger.debug(f"Failed to log request: HTTP {response.status_code}")
+            logger.error(
+                f"Failed to log request: HTTP {response.status_code} - {response.text}"
+            )
             return None
     except Exception as e:
-        logger.debug(f"Failed to log request: {e}")
+        logger.error(f"Failed to log request: {e}", exc_info=True)
         return None
 
 
@@ -245,11 +245,13 @@ async def update_request(
             timeout=5.0,
         )
         if response.status_code == 200:
-            logger.debug(f"📝 Updated request {request_id} status to {status}")
+            logger.info(f"📝 Updated request {request_id} status to {status}")
         else:
-            logger.debug(f"Failed to update request: HTTP {response.status_code}")
+            logger.error(
+                f"Failed to update request: HTTP {response.status_code} - {response.text}"
+            )
     except Exception as e:
-        logger.debug(f"Failed to update request: {e}")
+        logger.error(f"Failed to update request: {e}", exc_info=True)
 
 
 async def log_llm_review(
@@ -1165,20 +1167,25 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 "pending",
             )
 
-            # Link the existing container to this execute_python request
+            # Register container in database (includes MCP request link)
             if REQUIRE_TOKEN and MCP_API_TOKEN:
                 try:
                     await http_client.post(
-                        f"{DASHBOARD_URL}/api/containers/{sandbox_id}/link-request",
+                        f"{DASHBOARD_URL}/api/containers/register",
                         headers={"X-API-Token": MCP_API_TOKEN},
-                        json={"mcp_request_id": request_id},
+                        json={
+                            "container_id": sandbox_id,
+                            "container_name": sandbox_result["name"],
+                            "sandbox_id": sandbox_id,
+                            "mcp_request_id": request_id,  # Link to MCP request
+                        },
                         timeout=5.0,
                     )
                     logger.info(
-                        f"🔗 Linked container {sandbox_id[:12]} to execute_python request {request_id}"
+                        f"📦 Registered container {sandbox_id[:12]} with request {request_id}"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to link container to request: {e}")
+                    logger.error(f"Failed to register container: {e}")
 
             # Pass request_id to execute_code so it can link LLM reviews
             # Catch LLM rejections and return them without executing
@@ -1378,6 +1385,39 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             sandbox_result = await SandboxManager.create_sandbox(current_session_id)
             sandbox_id = sandbox_result["sandbox_id"]
             auto_cleanup = True  # Always cleanup after execution
+
+            # Log MCP request first
+            request_id = await log_request(
+                name,
+                {
+                    "sandbox_id": sandbox_id,
+                    "url": url,
+                    "code_length": len(code),
+                    "auto_cleanup": auto_cleanup,
+                },
+                "",  # Will update with result later
+                "pending",
+            )
+
+            # Register container in database (includes MCP request link)
+            if REQUIRE_TOKEN and MCP_API_TOKEN:
+                try:
+                    await http_client.post(
+                        f"{DASHBOARD_URL}/api/containers/register",
+                        headers={"X-API-Token": MCP_API_TOKEN},
+                        json={
+                            "container_id": sandbox_id,
+                            "container_name": sandbox_result["name"],
+                            "sandbox_id": sandbox_id,
+                            "mcp_request_id": request_id,  # Link to MCP request
+                        },
+                        timeout=5.0,
+                    )
+                    logger.info(
+                        f"📦 Registered container {sandbox_id[:12]} with request {request_id}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to register container: {e}")
 
             # Execute the fetched code (will go through LLM filter if enabled)
             try:

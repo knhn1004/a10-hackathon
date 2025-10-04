@@ -872,11 +872,11 @@ class ContainerMonitor:
 
         Analyzes sequences of Docker stats to detect temporal anomalies.
         Creates wave graph data showing confidence over time.
-        
+
         IMPORTANT: Model trained on 10 samples @ 1Hz (10 seconds).
         Monitor collects at 50Hz, so we need 500 samples = 10 seconds.
         We downsample to 10 samples before prediction to match training data.
-        
+
         Predictions:
         - Intermediate: Made every 10 seconds during execution, is_final=False
         - Final: Made once after container stops, is_final=True (aggregated)
@@ -907,9 +907,9 @@ class ContainerMonitor:
 
         # Use stats sequence for temporal model
         stats_sequence = self.container_stats_sequences.get(container_id, deque())
-        # Need 10 seconds of data at 50 samples/sec = 500 samples minimum
-        # This matches the model's training data (10 samples at 1Hz = 10 seconds)
-        MIN_SAMPLES_FOR_PREDICTION = 500  # 10 seconds * 50 Hz
+        # Model expects 10 samples. We collect at 50Hz (0.02s interval).
+        # Minimum: 10 samples = 0.2 seconds of execution
+        MIN_SAMPLES_FOR_PREDICTION = 10
         logger.info(
             f"🔍 Checking temporal for {metrics.name}: {len(stats_sequence)}/{MIN_SAMPLES_FOR_PREDICTION} samples"
         )
@@ -918,23 +918,25 @@ class ContainerMonitor:
                 f"⚠️ Not enough samples for {metrics.name}: {len(stats_sequence)}/{MIN_SAMPLES_FOR_PREDICTION}"
             )
             return None
-        
-        # Downsample: 500 samples @ 50Hz → 10 samples @ 1Hz (aggregate every 50 samples)
-        # Model expects 10 samples representing 10 seconds
-        downsampled_stats = []
-        samples_per_second = 50  # COLLECTION_INTERVAL = 0.02 = 50Hz
-        
-        for i in range(0, len(stats_sequence), samples_per_second):
-            # Take one sample every second (every 50 raw samples)
-            # Use the middle sample of each second for stability
-            sample_idx = min(i + samples_per_second // 2, len(stats_sequence) - 1)
-            downsampled_stats.append(stats_sequence[sample_idx])
-            
-            if len(downsampled_stats) >= 10:  # Model needs exactly 10 samples
-                break
-        
-        # Use downsampled stats for prediction
-        stats_sequence = downsampled_stats[-10:]  # Last 10 seconds
+
+        # Downsample: Take evenly-spaced samples to get 10 samples
+        # For fast execution (10-50 samples), take every N-th sample
+        # For longer execution (100+ samples), downsample more aggressively
+        total_samples = len(stats_sequence)
+        if total_samples >= 10:
+            # Calculate step size to get exactly 10 samples
+            step = total_samples / 10
+            downsampled_stats = []
+            for i in range(10):
+                idx = int(i * step)
+                if idx < total_samples:
+                    downsampled_stats.append(stats_sequence[idx])
+
+            # Use downsampled stats for prediction
+            stats_sequence = downsampled_stats[-10:]  # Last 10 samples
+        else:
+            # Should never happen (we check for MIN_SAMPLES_FOR_PREDICTION above)
+            return None
 
         try:
             # Run temporal model inference
