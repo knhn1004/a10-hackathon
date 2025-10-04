@@ -179,26 +179,28 @@ ENABLE_AUTH = True  # Always enabled
 
 if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
     oauth.register(
-        name='github',
+        name="github",
         client_id=GITHUB_CLIENT_ID,
         client_secret=GITHUB_CLIENT_SECRET,
-        authorize_url='https://github.com/login/oauth/authorize',
-        authorize_params={'scope': 'user:email'},
-        access_token_url='https://github.com/login/oauth/access_token',
+        authorize_url="https://github.com/login/oauth/authorize",
+        authorize_params={"scope": "user:email"},
+        access_token_url="https://github.com/login/oauth/access_token",
         access_token_params=None,
-        api_base_url='https://api.github.com/',
-        client_kwargs={'scope': 'user:email'},
+        api_base_url="https://api.github.com/",
+        client_kwargs={"scope": "user:email"},
     )
     logger.info("🔐 GitHub OAuth enabled")
 else:
-    logger.warning("⚠️  GitHub credentials missing - authentication will not work! Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET")
+    logger.warning(
+        "⚠️  GitHub credentials missing - authentication will not work! Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET"
+    )
 
 
 # Authentication dependency
 async def get_current_user(request: Request):
     """Get current authenticated user from session."""
-    
-    user = request.session.get('user')
+
+    user = request.session.get("user")
     if not user:
         raise HTTPException(
             status_code=401,
@@ -210,11 +212,11 @@ async def get_current_user(request: Request):
 
 # Public routes (no auth required)
 PUBLIC_ROUTES = [
-    "/", 
-    "/auth/github", 
-    "/auth/callback", 
-    "/health", 
-    "/api/health", 
+    "/",
+    "/auth/github",
+    "/auth/callback",
+    "/health",
+    "/api/health",
     "/api/auth/me",
     "/api/overview",
     "/api/system",
@@ -236,7 +238,7 @@ USER_ROUTES = [
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """Require authentication for user-specific and token management endpoints.
-    
+
     Public: System monitoring, container stats, health checks
     Protected: User's MCP requests, LLM reviews, ML predictions, tokens
     """
@@ -244,30 +246,33 @@ async def auth_middleware(request: Request, call_next):
     for public_route in PUBLIC_ROUTES:
         if request.url.path.startswith(public_route):
             return await call_next(request)
-    
+
     # Check if route requires user auth
     requires_auth = False
     for user_route in USER_ROUTES:
         if request.url.path.startswith(user_route):
             requires_auth = True
             break
-    
+
     if requires_auth:
         try:
-            user_in_session = 'user' in request.session
+            user_in_session = "user" in request.session
         except (AssertionError, RuntimeError):
             user_in_session = False
-        
+
         if not user_in_session:
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Not authenticated. Please login to view your data."}
+                content={
+                    "detail": "Not authenticated. Please login to view your data."
+                },
             )
-    
+
     return await call_next(request)
 
 
 # OAuth routes (no separate login page - button is on dashboard)
+
 
 @app.get("/login")
 async def login_redirect():
@@ -278,39 +283,39 @@ async def login_redirect():
 @app.get("/auth/github")
 async def auth_github(request: Request):
     """Initiate GitHub OAuth flow."""
-    redirect_uri = request.url_for('auth_callback')
+    redirect_uri = request.url_for("auth_callback")
     return await oauth.github.authorize_redirect(request, redirect_uri)
 
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request):
     """Handle GitHub OAuth callback.
-    
+
     This must match your GitHub OAuth App settings:
     - For local dev: http://localhost:8080/auth/callback
     - For production: https://your-app.fly.dev/auth/callback
     """
     try:
         token = await oauth.github.authorize_access_token(request)
-        resp = await oauth.github.get('user', token=token)
+        resp = await oauth.github.get("user", token=token)
         user_info = resp.json()
-        
+
         # Store user info in session
-        request.session['user'] = {
-            'login': user_info.get('login'),
-            'name': user_info.get('name'),
-            'email': user_info.get('email'),
-            'avatar_url': user_info.get('avatar_url'),
+        request.session["user"] = {
+            "login": user_info.get("login"),
+            "name": user_info.get("name"),
+            "email": user_info.get("email"),
+            "avatar_url": user_info.get("avatar_url"),
         }
-        
+
         logger.info(f"✅ User {user_info.get('login')} authenticated successfully")
-        
-        return RedirectResponse(url='/')
+
+        return RedirectResponse(url="/")
     except OAuthError as e:
         logger.error(f"OAuth error: {e}")
         return HTMLResponse(
             content=f"<h1>Authentication failed</h1><p>{str(e)}</p><a href='/login'>Try again</a>",
-            status_code=400
+            status_code=400,
         )
 
 
@@ -318,98 +323,93 @@ async def auth_callback(request: Request):
 async def logout(request: Request):
     """Logout user and redirect to dashboard (which will show login button)."""
     request.session.clear()
-    return RedirectResponse(url='/')
+    return RedirectResponse(url="/")
 
 
 @app.get("/api/auth/me")
 async def get_current_user_info(request: Request):
     """Get current authenticated user info.
-    
+
     Returns user info from session or 401 if not authenticated.
     """
-    user = request.session.get('user')
+    user = request.session.get("user")
     if user:
-        return {
-            "authenticated": True,
-            "auth_enabled": True,
-            "user": user
-        }
-    
-    return {
-        "authenticated": False,
-        "auth_enabled": True,
-        "user": None
-    }
+        return {"authenticated": True, "auth_enabled": True, "user": user}
+
+    return {"authenticated": False, "auth_enabled": True, "user": None}
 
 
 # =============================================================================
 # API Token Management Endpoints
 # =============================================================================
 
+
 class TokenGenerateRequest(BaseModel):
     name: str
     description: str = ""
+
 
 @app.post("/api/tokens/generate")
 async def generate_token_endpoint(
     token_request: TokenGenerateRequest,
     request: Request,
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
     """Generate a new API token for MCP authentication.
-    
+
     Args:
         token_request: Token name and description
         user: Current authenticated user
     """
     user_id = user.get("login")
     github_id = user.get("id", user_id)  # Use GitHub numeric ID if available
-    
+
     # Generate token using Prisma
     token = await token_manager.generate_token(
-        str(github_id), 
-        user_id, 
-        token_request.name, 
-        token_request.description
+        str(github_id), user_id, token_request.name, token_request.description
     )
-    
+
     logger.info(f"🔑 Generated API token '{token_request.name}' for user {user_id}")
-    
+
     return {
         "success": True,
         "token": token,
         "message": "Token generated successfully. Copy it now - you won't see it again!",
         "usage_instructions": {
-            "mcp_server": "Set environment variable: MCP_API_TOKEN=<token>",
-            "command_line": f"export MCP_API_TOKEN={token}"
-        }
+            "code_sandbox": "Set environment variable: MCP_API_TOKEN=<token>",
+            "command_line": f"export MCP_API_TOKEN={token}",
+        },
     }
 
 
 @app.get("/api/tokens")
 async def list_tokens(request: Request, user: dict = Depends(get_current_user)):
-    """List all API tokens for current user."""
+    """List all API tokens for current user with nicknames."""
     github_id = str(user.get("id", user.get("login")))
-    
+
     tokens = await token_manager.list_tokens(github_id)
-    
-    return {
-        "tokens": tokens,
-        "count": len(tokens)
-    }
+
+    # Add nickname (name field) to response for easy identification
+    token_list = [
+        {
+            **token,
+            "nickname": token.get("name", "Unnamed Token"),  # Use name as nickname
+        }
+        for token in tokens
+    ]
+
+    return {"tokens": token_list, "count": len(token_list)}
 
 
 @app.post("/api/tokens/{token_id}/revoke")
 async def revoke_token_endpoint(
-    request: Request,
-    token_id: str,
-    user: dict = Depends(get_current_user)
+    request: Request, token_id: str, user: dict = Depends(get_current_user)
 ):
     """Revoke an API token."""
     github_id = str(user.get("id", user.get("login")))
-    
+
     success = await token_manager.revoke_token(github_id, token_id)
-    
+
     if success:
         logger.info(f"🔒 Revoked API token for user {user.get('login')}")
         return {"success": True, "message": "Token revoked successfully"}
@@ -419,15 +419,13 @@ async def revoke_token_endpoint(
 
 @app.delete("/api/tokens/{token_id}")
 async def delete_token_endpoint(
-    request: Request,
-    token_id: str,
-    user: dict = Depends(get_current_user)
+    request: Request, token_id: str, user: dict = Depends(get_current_user)
 ):
     """Permanently delete an API token."""
     github_id = str(user.get("id", user.get("login")))
-    
+
     success = await token_manager.delete_token(github_id, token_id)
-    
+
     if success:
         logger.info(f"🗑️  Deleted API token for user {user.get('login')}")
         return {"success": True, "message": "Token deleted successfully"}
@@ -438,15 +436,15 @@ async def delete_token_endpoint(
 @app.post("/api/tokens/validate")
 async def validate_token_endpoint(token: str):
     """Validate an API token (used by MCP server).
-    
+
     This is a PUBLIC endpoint called by users' local MCP servers.
     Each user's MCP server sends their personal token for validation.
-    
+
     Args:
         token: The user's personal API token (from their local environment)
     """
     token_data = await token_manager.validate_token(token)
-    
+
     if token_data:
         return {
             "valid": True,
@@ -454,10 +452,7 @@ async def validate_token_endpoint(token: str):
             "token_name": token_data.get("name"),
         }
     else:
-        return {
-            "valid": False,
-            "error": "Invalid or revoked token"
-        }
+        return {"valid": False, "error": "Invalid or revoked token"}
 
 
 class McpRequestLog(BaseModel):
@@ -469,54 +464,103 @@ class McpRequestLog(BaseModel):
     result_preview: Optional[str] = None
     execution_time: Optional[float] = None
 
+
 @app.post("/api/requests/log")
 async def log_mcp_request(
     request: Request,
     log_data: McpRequestLog,
 ):
     """Log an MCP request to database.
-    
+
+    PUBLIC endpoint - uses X-API-Token header for authentication.
+    Returns the created request ID so container can be linked.
+    """
+    # Get token from header
+    api_token = request.headers.get("X-API-Token")
+    if not api_token:
+        raise HTTPException(status_code=401, detail="API token required")
+
+    # Validate token
+    token_data = await token_manager.validate_token(api_token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        db = await get_prisma()
+
+        # Get user from token
+        user_record = await db.users.find_first(
+            where={"username": token_data["user_id"]}
+        )
+
+        if not user_record:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Create MCP request record
+        request_id = str(uuid_module.uuid4())
+        await db.mcp_requests.create(
+            data={
+                "id": request_id,
+                "userId": user_record.id,
+                "tool": log_data.tool,
+                "status": log_data.status,
+                "sandboxId": log_data.sandbox_id,
+                "codeLength": log_data.code_length,
+                "url": log_data.url,
+                "resultPreview": log_data.result_preview,
+                "executionTime": log_data.execution_time,
+            }
+        )
+
+        return {"success": True, "message": "Request logged", "request_id": request_id}
+    except Exception as e:
+        logger.error(f"Failed to log MCP request: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/requests/{request_id}/update")
+async def update_mcp_request(
+    request: Request,
+    request_id: str,
+    status: str = None,
+    result_preview: str = None,
+    execution_time: float = None,
+    error_message: str = None,
+):
+    """Update an existing MCP request.
+
     PUBLIC endpoint - uses X-API-Token header for authentication.
     """
     # Get token from header
     api_token = request.headers.get("X-API-Token")
     if not api_token:
         raise HTTPException(status_code=401, detail="API token required")
-    
+
     # Validate token
     token_data = await token_manager.validate_token(api_token)
     if not token_data:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     try:
         db = await get_prisma()
-        
-        # Get user from token
-        user_record = await db.users.find_first(
-            where={'username': token_data['user_id']}
-        )
-        
-        if not user_record:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Create MCP request record
-        await db.mcp_requests.create(
-            data={
-                'id': str(uuid_module.uuid4()),
-                'userId': user_record.id,
-                'tool': log_data.tool,
-                'status': log_data.status,
-                'sandboxId': log_data.sandbox_id,
-                'codeLength': log_data.code_length,
-                'url': log_data.url,
-                'resultPreview': log_data.result_preview,
-                'executionTime': log_data.execution_time,
-            }
-        )
-        
-        return {"success": True, "message": "Request logged"}
+
+        # Build update data
+        update_data = {}
+        if status:
+            update_data["status"] = status
+        if result_preview is not None:
+            update_data["resultPreview"] = result_preview
+        if execution_time is not None:
+            update_data["executionTime"] = execution_time
+        if error_message is not None:
+            update_data["errorMessage"] = error_message
+
+        # Update the request
+        await db.mcp_requests.update(where={"id": request_id}, data=update_data)
+
+        return {"success": True, "message": "Request updated"}
     except Exception as e:
-        logger.error(f"Failed to log MCP request: {e}")
+        logger.error(f"Failed to update MCP request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -856,12 +900,10 @@ async def kill_container(container_id: str):
 
 @app.get("/api/requests/history")
 async def get_mcp_request_history(
-    request: Request,
-    limit: int = 50,
-    user: dict = Depends(get_current_user)
+    request: Request, limit: int = 50, user: dict = Depends(get_current_user)
 ):
     """
-    Get MCP function call history for the authenticated user.
+    Get MCP function call history with related data (containers, LLM reviews, ML predictions).
 
     Args:
         limit: Number of recent requests to return (default: 50)
@@ -870,36 +912,107 @@ async def get_mcp_request_history(
     try:
         db = await get_prisma()
         github_id = str(user.get("id", user.get("login")))
-        
+
         # Get user's requests only
-        user_record = await db.users.find_unique(where={'githubId': github_id})
+        user_record = await db.users.find_unique(where={"githubId": github_id})
         if not user_record:
             return {"requests": [], "count": 0}
-        
+
+        # Get requests with all related data (only final ML predictions)
         requests = await db.mcp_requests.find_many(
-            where={'userId': user_record.id},
-            order={'createdAt': 'desc'},
-            take=limit
+            where={"userId": user_record.id},
+            order={"createdAt": "desc"},
+            take=limit,
+            include={
+                "containers": {
+                    "include": {
+                        "ml_predictions": {
+                            "where": {"isFinal": True},  # Only show final predictions
+                            "take": 1,  # Should only be one final prediction per container
+                        },
+                        "crashes": True,
+                    }
+                },
+                "llm_reviews": True,
+                "users": True,
+            },
         )
-        
-        # Convert to dict
-        request_list = [{
-            'timestamp': req.createdAt.timestamp(),
-            'tool': req.tool,
-            'status': req.status,
-            'sandbox_id': req.sandboxId,
-            'arguments': {
-                'code_length': req.codeLength,
-                'url': req.url,
-            } if req.codeLength or req.url else {},
-            'result_preview': req.resultPreview,
-            'error_message': req.errorMessage,
-            'execution_time': req.executionTime,
-        } for req in requests]
-        
+
+        # Convert to dict with nested data
+        request_list = [
+            {
+                "id": req.id,
+                "timestamp": req.createdAt.timestamp(),
+                "tool": req.tool,
+                "status": req.status,
+                "sandbox_id": req.sandboxId,
+                "arguments": (
+                    {
+                        "code_length": req.codeLength,
+                        "url": req.url,
+                    }
+                    if req.codeLength or req.url
+                    else {}
+                ),
+                "result_preview": req.resultPreview,
+                "error_message": req.errorMessage,
+                "execution_time": req.executionTime,
+                "user": (
+                    {
+                        "username": req.users.username,
+                        "name": req.users.name,
+                    }
+                    if req.users
+                    else None
+                ),
+                # Related data
+                "containers": [
+                    {
+                        "id": cont.containerId,
+                        "name": cont.containerName,
+                        "sandbox_id": cont.sandboxId,
+                        "created_at": cont.createdAt.timestamp(),
+                        "deleted_at": (
+                            cont.deletedAt.timestamp() if cont.deletedAt else None
+                        ),
+                        "status": "deleted" if cont.deletedAt else "active",
+                        "ml_predictions": [
+                            {
+                                "prediction": pred.prediction,
+                                "confidence": pred.confidence,
+                                "samples": pred.samples,
+                                "created_at": pred.createdAt.timestamp(),
+                            }
+                            for pred in (cont.ml_predictions or [])
+                        ],
+                        "crashes": [
+                            {
+                                "exit_code": crash.exitCode,
+                                "oom_killed": crash.oomKilled,
+                                "crashed_at": crash.crashedAt.timestamp(),
+                            }
+                            for crash in (cont.crashes or [])
+                        ],
+                    }
+                    for cont in (req.containers or [])
+                ],
+                "llm_reviews": [
+                    {
+                        "decision": review.decision,
+                        "confidence": review.confidence,
+                        "threats_detected": review.threatsDetected,
+                        "model_used": review.modelUsed,
+                        "created_at": review.createdAt.timestamp(),
+                    }
+                    for review in (req.llm_reviews or [])
+                ],
+            }
+            for req in requests
+        ]
+
         return {"requests": request_list, "count": len(request_list)}
     except Exception as e:
-        logger.error(f"Error reading MCP request history: {e}")
+        logger.error(f"Error reading MCP request history: {e}", exc_info=True)
         return {"requests": [], "count": 0}
 
 
@@ -965,107 +1078,114 @@ async def get_ml_model_info():
 
 @app.get("/api/llm/reviews")
 async def get_llm_reviews(
-    request: Request,
-    limit: int = 20,
-    user: dict = Depends(get_current_user)
+    request: Request, limit: int = 20, user: dict = Depends(get_current_user)
 ):
-    """Return recent LLM code reviews for the authenticated user."""
+    """Return recent LLM code reviews for the authenticated user with MCP request context."""
     try:
         db = await get_prisma()
         github_id = str(user.get("id", user.get("login")))
-        
-        # Get user's reviews only
-        user_record = await db.users.find_unique(where={'githubId': github_id})
+
+        # Get user's reviews via their MCP requests
+        user_record = await db.users.find_unique(where={"githubId": github_id})
         if not user_record:
             return {"reviews": [], "count": 0}
-        
+
+        # Get reviews with MCP request context
         reviews = await db.llm_reviews.find_many(
-            where={'userId': user_record.id},
-            order={'createdAt': 'desc'},
-            take=limit
-        )
-        
-        # Convert to dict
-        review_list = [{
-            'timestamp': review.createdAt.timestamp(),
-            'sandbox_id': review.sandboxId,
-            'source': review.source,
-            'code_length': review.codeLength,
-            'review': {
-                'decision': review.decision,
-                'confidence': review.confidence,
-                'threats_detected': review.threatsDetected,
-                'reasoning': review.reasoning,
+            where={"mcp_requests": {"is": {"userId": user_record.id}}},
+            order={"createdAt": "desc"},
+            take=limit,
+            include={
+                "mcp_requests": True,
             },
-            'review_time': review.reviewTime,
-            'model_used': review.modelUsed,
-        } for review in reviews]
-        
+        )
+
+        # Convert to dict
+        review_list = [
+            {
+                "timestamp": review.createdAt.timestamp(),
+                "sandbox_id": review.sandboxId,
+                "source": review.source,
+                "code_length": review.codeLength,
+                "review": {
+                    "decision": review.decision,
+                    "confidence": review.confidence,
+                    "threats_detected": review.threatsDetected,
+                    "reasoning": review.reasoning,
+                },
+                "review_time": review.reviewTime,
+                "model_used": review.modelUsed,
+                "mcp_request": (
+                    {
+                        "tool": review.mcp_requests.tool,
+                        "status": review.mcp_requests.status,
+                        "created_at": review.mcp_requests.createdAt.timestamp(),
+                    }
+                    if review.mcp_requests
+                    else None
+                ),
+            }
+            for review in reviews
+        ]
+
         return {"reviews": review_list, "count": len(review_list)}
     except Exception as e:
-        logger.error(f"Error reading LLM reviews: {e}")
+        logger.error(f"Error reading LLM reviews: {e}", exc_info=True)
         return {"reviews": [], "count": 0}
 
-
-class LlmReviewLog(BaseModel):
-    sandbox_id: str
-    code: str
-    code_length: int
-    source: str
-    decision: str
-    confidence: float
-    threats_detected: list[str]
-    reasoning: Optional[str] = None
-    review_time: float
-    model_used: str
 
 class ContainerRegister(BaseModel):
     container_id: str
     container_name: str
     sandbox_id: str
+    mcp_request_id: str = None  # Link to the MCP request that created it
+
 
 @app.post("/api/containers/register")
 async def register_container(
     request: Request,
     container_reg: ContainerRegister,
 ):
-    """Register a container with its owner.
-    
+    """Register a container with its owner and optionally link to MCP request.
+
     PUBLIC endpoint - uses X-API-Token header for authentication.
     """
     # Get token from header
     api_token = request.headers.get("X-API-Token")
     if not api_token:
         raise HTTPException(status_code=401, detail="API token required")
-    
+
     # Validate token
     token_data = await token_manager.validate_token(api_token)
     if not token_data:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     try:
         db = await get_prisma()
-        
+
         # Get user from token
         user_record = await db.users.find_first(
-            where={'username': token_data['user_id']}
+            where={"username": token_data["user_id"]}
         )
-        
+
         if not user_record:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Register container
+
+        # Register container with optional MCP request link
         await db.containers.create(
             data={
-                'id': str(uuid_module.uuid4()),
-                'containerId': container_reg.container_id,
-                'containerName': container_reg.container_name,
-                'sandboxId': container_reg.sandbox_id,
-                'userId': user_record.id,
+                "id": str(uuid_module.uuid4()),
+                "containerId": container_reg.container_id,
+                "containerName": container_reg.container_name,
+                "sandboxId": container_reg.sandbox_id,
+                "userId": user_record.id,
+                "mcpRequestId": container_reg.mcp_request_id,
             }
         )
-        
-        logger.info(f"📦 Registered container {container_reg.container_id} for user {token_data['user_id']}")
+
+        logger.info(
+            f"📦 Registered container {container_reg.container_id} for user {token_data['user_id']}"
+        )
         return {"success": True, "message": "Container registered"}
     except Exception as e:
         logger.error(f"Failed to register container: {e}")
@@ -1076,26 +1196,27 @@ async def register_container(
 @app.get("/api/containers/{container_id}/owner")
 async def get_container_owner(container_id: str):
     """Get the owner of a container (used by monitor).
-    
+
     PUBLIC endpoint - monitor uses this to link ML predictions.
     """
     try:
         logger.info(f"🔍 Looking up owner for container: {container_id}")
         db = await get_prisma()
-        
+
         container = await db.containers.find_unique(
-            where={'containerId': container_id},
-            include={'users': True}
+            where={"containerId": container_id}, include={"users": True}
         )
-        
+
         logger.info(f"   Query result: {container}")
-        
+
         if not container:
             logger.warning(f"   ❌ Container {container_id} not found in database")
             return {"found": False}
-        
-        logger.info(f"   ✅ Found owner: {container.users.username} ({container.users.id})")
-        
+
+        logger.info(
+            f"   ✅ Found owner: {container.users.username} ({container.users.id})"
+        )
+
         return {
             "found": True,
             "user_id": container.users.id,
@@ -1106,17 +1227,90 @@ async def get_container_owner(container_id: str):
         return {"found": False}
 
 
+@app.post("/api/containers/{container_id}/mark-deleted")
+async def mark_container_deleted(container_id: str):
+    """Mark a container as deleted in the database.
+
+    PUBLIC endpoint - called when container is stopped/removed.
+    """
+    try:
+        db = await get_prisma()
+
+        # Update container with deletedAt timestamp
+        from datetime import datetime
+
+        await db.containers.update(
+            where={"containerId": container_id}, data={"deletedAt": datetime.now()}
+        )
+
+        logger.info(f"✅ Marked container {container_id} as deleted in database")
+        return {"success": True, "message": "Container marked as deleted"}
+    except Exception as e:
+        logger.error(f"❌ Failed to mark container as deleted: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/containers/{container_id}/link-request")
+async def link_container_to_request(
+    container_id: str,
+    request: Request,
+):
+    """Link a container to an MCP request (for execute_python).
+
+    PROTECTED endpoint - requires API token.
+    """
+    try:
+        # Get API token from header
+        api_token = request.headers.get("X-API-Token")
+        if not api_token:
+            raise HTTPException(status_code=401, detail="API token required")
+
+        # Validate token
+        db = await get_prisma()
+        import hashlib
+
+        token_hash = hashlib.sha256(api_token.encode()).hexdigest()
+        token_record = await db.api_tokens.find_unique(where={"tokenHash": token_hash})
+        if not token_record or not token_record.active:
+            raise HTTPException(status_code=401, detail="Invalid or inactive API token")
+
+        # Get request body
+        body = await request.json()
+        mcp_request_id = body.get("mcp_request_id")
+        if not mcp_request_id:
+            raise HTTPException(status_code=400, detail="mcp_request_id required")
+
+        # Update container to link to this MCP request
+        await db.containers.update(
+            where={"containerId": container_id}, data={"mcpRequestId": mcp_request_id}
+        )
+
+        logger.info(
+            f"🔗 Linked container {container_id[:12]} to MCP request {mcp_request_id}"
+        )
+        return {"success": True, "message": "Container linked to request"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to link container to request: {e}")
+        return {"success": False, "message": str(e)}
+
+
 class MlPredictionLog(BaseModel):
     container_id: str
     container_name: str
+    mcp_request_id: Optional[str] = None  # Link to MCP request
     prediction: str  # "normal", "suspicious", "mining"
     confidence: float
     samples: int
     duration: float
     features: dict  # All features as JSON
+    is_final: bool = False  # Is this the final aggregated prediction?
+
 
 class MlPredictionLogExtended(MlPredictionLog):
     user_id_override: Optional[str] = None  # For monitor internal calls
+
 
 @app.post("/api/ml/predictions/log")
 async def log_ml_prediction_endpoint(
@@ -1124,11 +1318,11 @@ async def log_ml_prediction_endpoint(
     pred_log: MlPredictionLogExtended,
 ):
     """Log an ML prediction to database.
-    
+
     PUBLIC endpoint - uses X-API-Token or X-Monitor-Internal header.
     """
     user_id = None
-    
+
     # Check for monitor internal call
     if request.headers.get("X-Monitor-Internal") == "true":
         # Monitor provides user_id directly
@@ -1141,49 +1335,64 @@ async def log_ml_prediction_endpoint(
         api_token = request.headers.get("X-API-Token")
         if not api_token:
             return {"success": False, "message": "Authentication required"}
-        
+
         # Validate token
         token_data = await token_manager.validate_token(api_token)
         if not token_data:
             raise HTTPException(status_code=401, detail="Invalid token")
-        
+
         # Get user from token
         db = await get_prisma()
         user_record = await db.users.find_first(
-            where={'username': token_data['user_id']}
+            where={"username": token_data["user_id"]}
         )
-        
+
         if not user_record:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         user_id = user_record.id
-    
+
     try:
         db = await get_prisma()
-        
-        # Create ML prediction record (userId optional for now)
+
+        # Create ML prediction record
         pred_data = {
-            'id': str(uuid_module.uuid4()),
-            'containerId': pred_log.container_id,
-            'containerName': pred_log.container_name,
-            'prediction': pred_log.prediction,
-            'confidence': pred_log.confidence,
-            'samples': pred_log.samples,
-            'duration': pred_log.duration,
-            'features': json.dumps(pred_log.features),  # Json field needs string
+            "id": str(uuid_module.uuid4()),
+            "containerId": pred_log.container_id,
+            "containerName": pred_log.container_name,
+            "mcpRequestId": pred_log.mcp_request_id,
+            "prediction": pred_log.prediction,
+            "confidence": pred_log.confidence,
+            "samples": pred_log.samples,
+            "duration": pred_log.duration,
+            "features": json.dumps(pred_log.features),  # Json field needs string
+            "isFinal": pred_log.is_final,
         }
-        
-        # Add userId if available
-        if user_id:
-            pred_data['userId'] = user_id
-        
+
         await db.ml_predictions.create(data=pred_data)
-        
-        logger.debug(f"📊 ML prediction saved to database: {pred_log.prediction} ({pred_log.confidence:.2%})")
+
+        logger.debug(
+            f"📊 ML prediction saved to database: {pred_log.prediction} ({pred_log.confidence:.2%})"
+        )
         return {"success": True, "message": "Prediction logged"}
     except Exception as e:
         logger.error(f"Failed to log ML prediction: {e}")
         return {"success": False, "message": str(e)}
+
+
+class LlmReviewLog(BaseModel):
+    mcp_request_id: str  # Link to the MCP request
+    sandbox_id: str
+    code: str
+    code_length: int
+    source: str
+    decision: str
+    confidence: float
+    threats_detected: list[str]
+    reasoning: Optional[str] = None
+    review_time: float
+    model_used: str
+
 
 @app.post("/api/llm/reviews/log")
 async def log_llm_review_endpoint(
@@ -1191,48 +1400,40 @@ async def log_llm_review_endpoint(
     review_log: LlmReviewLog,
 ):
     """Log an LLM code review to database.
-    
+
     PUBLIC endpoint - uses X-API-Token header for authentication.
     """
     # Get token from header
     api_token = request.headers.get("X-API-Token")
     if not api_token:
         raise HTTPException(status_code=401, detail="API token required")
-    
+
     # Validate token
     token_data = await token_manager.validate_token(api_token)
     if not token_data:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     try:
         db = await get_prisma()
-        
-        # Get user from token
-        user_record = await db.users.find_first(
-            where={'username': token_data['user_id']}
-        )
-        
-        if not user_record:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Create LLM review record
+
+        # Create LLM review record (linked to MCP request)
         await db.llm_reviews.create(
             data={
-                'id': str(uuid_module.uuid4()),
-                'userId': user_record.id,
-                'sandboxId': review_log.sandbox_id,
-                'code': review_log.code,
-                'codeLength': review_log.code_length,
-                'source': review_log.source,
-                'decision': review_log.decision,
-                'confidence': review_log.confidence,
-                'threatsDetected': review_log.threats_detected,
-                'reasoning': review_log.reasoning,
-                'reviewTime': review_log.review_time,
-                'modelUsed': review_log.model_used,
+                "id": str(uuid_module.uuid4()),
+                "mcpRequestId": review_log.mcp_request_id,
+                "sandboxId": review_log.sandbox_id,
+                "code": review_log.code,
+                "codeLength": review_log.code_length,
+                "source": review_log.source,
+                "decision": review_log.decision,
+                "confidence": review_log.confidence,
+                "threatsDetected": review_log.threats_detected,
+                "reasoning": review_log.reasoning,
+                "reviewTime": review_log.review_time,
+                "modelUsed": review_log.model_used,
             }
         )
-        
+
         return {"success": True, "message": "Review logged"}
     except Exception as e:
         logger.error(f"Failed to log LLM review: {e}")
@@ -1261,40 +1462,72 @@ async def get_ml_classifications(limit: int = 50):
 
 @app.get("/api/ml/predictions")
 async def get_ml_predictions(
-    request: Request,
-    limit: int = 100,
-    user: dict = Depends(get_current_user)
+    request: Request, limit: int = 100, user: dict = Depends(get_current_user)
 ):
-    """Return ALL recent ML predictions for the authenticated user."""
+    """Return ALL recent ML predictions for the authenticated user with container context."""
     try:
         db = await get_prisma()
         github_id = str(user.get("id", user.get("login")))
-        
-        # Get user's predictions only
-        user_record = await db.users.find_unique(where={'githubId': github_id})
+
+        # Get user's predictions via their containers
+        user_record = await db.users.find_unique(where={"githubId": github_id})
         if not user_record:
             return {"predictions": [], "count": 0}
-        
+
+        # Get predictions with container and MCP request context
         predictions = await db.ml_predictions.find_many(
-            where={'userId': user_record.id},
-            order={'createdAt': 'desc'},
-            take=limit
+            where={"container": {"is": {"userId": user_record.id}}},
+            order={"createdAt": "desc"},
+            take=limit,
+            include={
+                "container": {
+                    "include": {
+                        "mcp_requests": True,
+                    }
+                }
+            },
         )
-        
+
         # Convert to dict
-        pred_list = [{
-            'timestamp': pred.createdAt.timestamp(),
-            'container_id': pred.containerId,
-            'name': pred.containerName,
-            'prediction': pred.prediction,
-            'confidence': pred.confidence,
-            'samples': pred.samples,
-            'features': pred.features,
-        } for pred in predictions]
-        
+        pred_list = [
+            {
+                "timestamp": pred.createdAt.timestamp(),
+                "container_id": pred.containerId,
+                "name": pred.containerName,
+                "prediction": pred.prediction,
+                "confidence": pred.confidence,
+                "samples": pred.samples,
+                "features": pred.features,
+                "container": (
+                    {
+                        "sandbox_id": pred.container.sandboxId,
+                        "created_at": pred.container.createdAt.timestamp(),
+                        "deleted_at": (
+                            pred.container.deletedAt.timestamp()
+                            if pred.container.deletedAt
+                            else None
+                        ),
+                        "status": "deleted" if pred.container.deletedAt else "active",
+                    }
+                    if pred.container
+                    else None
+                ),
+                "mcp_request": (
+                    {
+                        "tool": pred.container.mcp_requests.tool,
+                        "status": pred.container.mcp_requests.status,
+                        "created_at": pred.container.mcp_requests.createdAt.timestamp(),
+                    }
+                    if pred.container and pred.container.mcp_requests
+                    else None
+                ),
+            }
+            for pred in predictions
+        ]
+
         return {"predictions": pred_list, "count": len(pred_list)}
     except Exception as e:
-        logger.error(f"Error reading ML predictions: {e}")
+        logger.error(f"Error reading ML predictions: {e}", exc_info=True)
         return {"predictions": [], "count": 0}
 
 

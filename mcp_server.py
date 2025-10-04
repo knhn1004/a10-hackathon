@@ -40,7 +40,7 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("code-sandbox-mcp")
+logger = logging.getLogger("code-sandbox")
 
 # Optional: Import monitoring if available
 try:
@@ -108,20 +108,18 @@ llm_review_history: list = []  # Store recent LLM code reviews
 
 async def validate_api_token(token: str) -> Dict[str, Any]:
     """Validate API token with dashboard server.
-    
+
     Args:
         token: The API token to validate
-        
+
     Returns:
         Dict with validation result and user info
     """
     try:
         response = await http_client.post(
-            f"{DASHBOARD_URL}/api/tokens/validate",
-            params={"token": token},
-            timeout=5.0
+            f"{DASHBOARD_URL}/api/tokens/validate", params={"token": token}, timeout=5.0
         )
-        
+
         if response.status_code == 200:
             data = response.json()
             return data
@@ -164,39 +162,84 @@ def load_existing_history():
 load_existing_history()
 
 
-def log_request(tool_name: str, arguments: Dict, result: str, status: str = "success", execution_time: float = None):
-    """Log MCP request to database via dashboard API (fire and forget)."""
+async def log_request(
+    tool_name: str,
+    arguments: Dict,
+    result: str,
+    status: str = "success",
+    execution_time: float = None,
+) -> Optional[str]:
+    """Log MCP request to database via dashboard API.
+
+    Returns the request_id for linking related data, or None if logging fails.
+    """
     # Only log if token auth is enabled
     if not REQUIRE_TOKEN or not MCP_API_TOKEN:
-        return
-    
-    # Fire and forget - don't block on logging
-    async def _log():
-        try:
-            response = await http_client.post(
-                f"{DASHBOARD_URL}/api/requests/log",
-                headers={"X-API-Token": MCP_API_TOKEN},
-                json={
-                    "tool": tool_name,
-                    "status": status,
-                    "sandbox_id": arguments.get("sandbox_id"),
-                    "code_length": arguments.get("code_length"),
-                    "url": arguments.get("url"),
-                    "result_preview": result[:500] if result else "",
-                    "execution_time": execution_time,
-                },
-                timeout=5.0
+        return None
+
+    try:
+        response = await http_client.post(
+            f"{DASHBOARD_URL}/api/requests/log",
+            headers={"X-API-Token": MCP_API_TOKEN},
+            json={
+                "tool": tool_name,
+                "status": status,
+                "sandbox_id": arguments.get("sandbox_id"),
+                "code_length": arguments.get("code_length"),
+                "url": arguments.get("url"),
+                "result_preview": result[:500] if result else "",
+                "execution_time": execution_time,
+            },
+            timeout=5.0,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            request_id = data.get("request_id")
+            logger.debug(
+                f"📝 Logged {tool_name} to database (request_id: {request_id})"
             )
-            if response.status_code == 200:
-                logger.debug(f"📝 Logged {tool_name} to database")
-        except Exception as e:
-            logger.debug(f"Failed to log request: {e}")
-    
-    # Schedule the async task without blocking
-    asyncio.create_task(_log())
+            return request_id
+        else:
+            logger.debug(f"Failed to log request: HTTP {response.status_code}")
+            return None
+    except Exception as e:
+        logger.debug(f"Failed to log request: {e}")
+        return None
 
 
-def log_llm_review(
+async def update_request(
+    request_id: str,
+    status: str = None,
+    result: str = None,
+    execution_time: float = None,
+    error_message: str = None,
+):
+    """Update an existing MCP request in the database."""
+    if not REQUIRE_TOKEN or not MCP_API_TOKEN or not request_id:
+        return
+
+    try:
+        response = await http_client.post(
+            f"{DASHBOARD_URL}/api/requests/{request_id}/update",
+            headers={"X-API-Token": MCP_API_TOKEN},
+            params={
+                "status": status,
+                "result_preview": result[:500] if result else None,
+                "execution_time": execution_time,
+                "error_message": error_message,
+            },
+            timeout=5.0,
+        )
+        if response.status_code == 200:
+            logger.debug(f"📝 Updated request {request_id} status to {status}")
+        else:
+            logger.debug(f"Failed to update request: HTTP {response.status_code}")
+    except Exception as e:
+        logger.debug(f"Failed to update request: {e}")
+
+
+async def log_llm_review(
+    mcp_request_id: str,
     sandbox_id: str,
     code: str,
     review: Any,
@@ -204,49 +247,45 @@ def log_llm_review(
     review_time: float = 0.0,
     model_used: str = "unknown",
 ):
-    """Persist LLM code review details to database (fire and forget)."""
-    if not REQUIRE_TOKEN or not MCP_API_TOKEN:
+    """Persist LLM code review details to database."""
+    if not REQUIRE_TOKEN or not MCP_API_TOKEN or not mcp_request_id:
         return
-    
-    # Fire and forget - don't block
-    async def _log():
-        try:
-            # Normalize review to dict
-            if isinstance(review, dict):
-                decision = review.get("decision", "unknown")
-                confidence = review.get("confidence", 0.0)
-                threats = review.get("threats_detected", [])
-                reasoning = review.get("reasons", "")
-            else:
-                decision = getattr(review, "decision", "unknown")
-                confidence = getattr(review, "confidence", 0.0)
-                threats = getattr(review, "threats_detected", [])
-                reasoning = getattr(review, "reasons", "")
-            
-            # Send to dashboard API
-            await http_client.post(
-                f"{DASHBOARD_URL}/api/llm/reviews/log",
-                headers={"X-API-Token": MCP_API_TOKEN},
-                json={
-                    "sandbox_id": sandbox_id,
-                    "code": code,
-                    "code_length": len(code),
-                    "source": source,
-                    "decision": decision,
-                    "confidence": confidence,
-                    "threats_detected": threats if isinstance(threats, list) else [],
-                    "reasoning": str(reasoning) if reasoning else None,
-                    "review_time": review_time,
-                    "model_used": model_used,
-                },
-                timeout=5.0
-            )
-            logger.debug(f"📝 Logged LLM review to database")
-        except Exception as e:
-            logger.debug(f"Failed to log LLM review: {e}")
-    
-    # Schedule the async task
-    asyncio.create_task(_log())
+
+    try:
+        # Normalize review to dict
+        if isinstance(review, dict):
+            decision = review.get("decision", "unknown")
+            confidence = review.get("confidence", 0.0)
+            threats = review.get("threats_detected", [])
+            reasoning = review.get("reasons", "")
+        else:
+            decision = getattr(review, "decision", "unknown")
+            confidence = getattr(review, "confidence", 0.0)
+            threats = getattr(review, "threats_detected", [])
+            reasoning = getattr(review, "reasons", "")
+
+        # Send to dashboard API
+        await http_client.post(
+            f"{DASHBOARD_URL}/api/llm/reviews/log",
+            headers={"X-API-Token": MCP_API_TOKEN},
+            json={
+                "mcp_request_id": mcp_request_id,
+                "sandbox_id": sandbox_id,
+                "code": code,
+                "code_length": len(code),
+                "source": source,
+                "decision": decision,
+                "confidence": confidence,
+                "threats_detected": threats if isinstance(threats, list) else [],
+                "reasoning": str(reasoning) if reasoning else None,
+                "review_time": review_time,
+                "model_used": model_used,
+            },
+            timeout=5.0,
+        )
+        logger.debug(f"📝 Logged LLM review to database (request_id: {mcp_request_id})")
+    except Exception as e:
+        logger.debug(f"Failed to log LLM review: {e}")
 
 
 def get_request_history(limit: int = 50) -> list:
@@ -413,7 +452,7 @@ class SandboxManager:
 
     @staticmethod
     async def execute_code(
-        sandbox_id: str, code: str, session_id: str
+        sandbox_id: str, code: str, session_id: str, request_id: str = None
     ) -> Dict[str, Any]:
         """Execute Python code in a sandbox."""
         # Verify ownership
@@ -451,15 +490,17 @@ class SandboxManager:
                             f"   Reasons: {'; '.join(review_result.reasons[:2])}"
                         )  # First 2 reasons
 
-                    # Persist LLM review
-                    log_llm_review(
-                        sandbox_id=sandbox_id,
-                        code=code,
-                        review=review_result,
-                        source="execute_code",
-                        review_time=0.0,  # TODO: Track actual review time
-                        model_used="llama3.1:latest"  # TODO: Get from filter
-                    )
+                    # Persist LLM review (linked to MCP request)
+                    if request_id:
+                        await log_llm_review(
+                            mcp_request_id=request_id,
+                            sandbox_id=sandbox_id,
+                            code=code,
+                            review=review_result,
+                            source="execute_code",
+                            review_time=0.0,  # TODO: Track actual review time
+                            model_used="llama3.1:latest",  # TODO: Get from filter
+                        )
 
                     if review_result.decision == "reject":
                         # Code rejected by LLM filter
@@ -471,27 +512,36 @@ class SandboxManager:
                         )
 
                         error_message = f"""
-🚫 CODE REJECTED BY SECURITY FILTER
+🚫 SECURITY REJECTION - CODE NOT EXECUTED
 
-The LLM security agent has identified potential threats in your code and rejected execution.
+⛔ DO NOT RETRY THIS CODE ⛔
+
+The security filter has REJECTED this code and it was NOT executed.
+This is a FINAL decision based on detected security threats.
 
 Decision: REJECT
 Confidence: {review_result.confidence:.1%}
 
-Threats Detected:
-{chr(10).join(f'  - {threat}' for threat in review_result.threats_detected)}
+🔴 Threats Detected:
+{chr(10).join(f'  • {threat}' for threat in review_result.threats_detected)}
 
-Reasons:
-{chr(10).join(f'  - {reason}' for reason in review_result.reasons)}
+📋 Reasons for Rejection:
+{chr(10).join(f'  • {reason}' for reason in review_result.reasons)}
+
+⚠️  TO PROCEED: The user must modify the code to remove these security threats.
+    DO NOT attempt to execute this code again without significant changes.
 """
 
                         if review_result.safe_alternative:
-                            error_message += f"\n\nSuggested Safe Alternative:\n{review_result.safe_alternative}\n"
+                            error_message += f"\n✅ Suggested Safe Alternative:\n{review_result.safe_alternative}\n"
 
                         error_message += "\n" + "=" * 60
-                        error_message += "\nYour Code:\n" + "=" * 60 + "\n"
+                        error_message += (
+                            "\n❌ REJECTED CODE (NOT EXECUTED):\n" + "=" * 60 + "\n"
+                        )
                         error_message += code
                         error_message += "\n" + "=" * 60
+                        error_message += "\n\n⛔ This code was blocked for security reasons and was NOT run."
 
                         raise ValueError(error_message)
                     else:
@@ -505,47 +555,80 @@ Reasons:
                         "⚠️ Proceeding with code execution WITHOUT LLM review"
                     )
                     # Log skipped review due to timeout
-                    log_llm_review(
-                        sandbox_id=sandbox_id,
-                        code=code,
-                        review={
-                            "decision": "skipped",
-                            "confidence": 0.0,
-                            "reasons": "LLM filter timed out (>30s)",
-                            "threats_detected": [],
-                        },
-                        source="execute_code",
-                    )
+                    if request_id:
+                        await log_llm_review(
+                            mcp_request_id=request_id,
+                            sandbox_id=sandbox_id,
+                            code=code,
+                            review={
+                                "decision": "skipped",
+                                "confidence": 0.0,
+                                "reasons": "LLM filter timed out (>30s)",
+                                "threats_detected": [],
+                            },
+                            source="execute_code",
+                        )
+                except ValueError as e:
+                    # This is a rejection from the LLM filter - re-raise it to stop execution
+                    error_str = str(e)
+                    if (
+                        "SECURITY REJECTION" in error_str
+                        or "CODE REJECTED" in error_str
+                    ):
+                        raise  # Re-raise the ValueError to stop execution
+                    else:
+                        # Other ValueError, log and skip
+                        logger.error(f"❌ LLM filter error: {e}")
+                        logger.warning(
+                            "⚠️ Proceeding with code execution WITHOUT LLM review"
+                        )
+                        if request_id:
+                            await log_llm_review(
+                                mcp_request_id=request_id,
+                                sandbox_id=sandbox_id,
+                                code=code,
+                                review={
+                                    "decision": "skipped",
+                                    "confidence": 0.0,
+                                    "reasons": f"LLM filter error: {e}",
+                                    "threats_detected": ["review_error"],
+                                },
+                                source="execute_code",
+                            )
                 except Exception as e:
                     logger.error(f"❌ LLM filter error: {e}")
                     logger.warning(
                         "⚠️ Proceeding with code execution WITHOUT LLM review"
                     )
                     # Log skipped review due to error
-                    log_llm_review(
+                    if request_id:
+                        await log_llm_review(
+                            mcp_request_id=request_id,
+                            sandbox_id=sandbox_id,
+                            code=code,
+                            review={
+                                "decision": "skipped",
+                                "confidence": 0.0,
+                                "reasons": f"LLM filter error: {e}",
+                                "threats_detected": ["review_error"],
+                            },
+                            source="execute_code",
+                        )
+            else:
+                # Log skipped review when filter unavailable
+                if request_id:
+                    await log_llm_review(
+                        mcp_request_id=request_id,
                         sandbox_id=sandbox_id,
                         code=code,
                         review={
                             "decision": "skipped",
                             "confidence": 0.0,
-                            "reasons": f"LLM filter error: {e}",
-                            "threats_detected": ["review_error"],
+                            "reasons": "LLM code filter unavailable",
+                            "threats_detected": [],
                         },
                         source="execute_code",
                     )
-            else:
-                # Log skipped review when filter unavailable
-                log_llm_review(
-                    sandbox_id=sandbox_id,
-                    code=code,
-                    review={
-                        "decision": "skipped",
-                        "confidence": 0.0,
-                        "reasons": "LLM code filter unavailable",
-                        "threats_detected": [],
-                    },
-                    source="execute_code",
-                )
 
         logger.info(f"Executing code in sandbox: {sandbox_id}")
 
@@ -790,6 +873,19 @@ Check the observability dashboard for detailed metrics.
             await asyncio.to_thread(container.stop)
             await asyncio.to_thread(container.remove)
 
+            # Mark container as deleted in database
+            if REQUIRE_TOKEN and MCP_API_TOKEN:
+                try:
+                    await http_client.post(
+                        f"{DASHBOARD_URL}/api/containers/{sandbox_id}/mark-deleted",
+                        timeout=5.0,
+                    )
+                    logger.info(
+                        f"✅ Marked container {sandbox_id} as deleted in database"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to mark container as deleted: {e}")
+
             sandboxes.pop(sandbox_id, None)
             sandbox_owners.pop(sandbox_id, None)
 
@@ -824,6 +920,19 @@ async def cleanup_idle_sandboxes():
                     )
                     await asyncio.to_thread(container.stop)
                     await asyncio.to_thread(container.remove)
+
+                    # Mark container as deleted in database
+                    if REQUIRE_TOKEN and MCP_API_TOKEN:
+                        try:
+                            await http_client.post(
+                                f"{DASHBOARD_URL}/api/containers/{sandbox_id}/mark-deleted",
+                                timeout=5.0,
+                            )
+                            logger.info(
+                                f"✅ Marked idle container {sandbox_id} as deleted in database"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to mark container as deleted: {e}")
                 except docker.errors.NotFound:
                     pass
                 finally:
@@ -1005,23 +1114,26 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 f"You can now execute Python code using execute_python with this sandbox_id."
             )
 
-            # Log request
-            log_request(name, arguments, result_text, "success")
-            
-            # Register container ownership if token auth is enabled
+            # Log request and get request_id for linking
+            request_id = await log_request(name, arguments, result_text, "success")
+
+            # Register container ownership with MCP request link
             if REQUIRE_TOKEN and MCP_API_TOKEN:
                 try:
                     await http_client.post(
                         f"{DASHBOARD_URL}/api/containers/register",
                         headers={"X-API-Token": MCP_API_TOKEN},
                         json={
-                            "container_id": result['sandbox_id'],
-                            "container_name": result['sandbox_id'],
-                            "sandbox_id": result['sandbox_id'],
+                            "container_id": result["sandbox_id"],
+                            "container_name": result["sandbox_id"],
+                            "sandbox_id": result["sandbox_id"],
+                            "mcp_request_id": request_id,  # Link to MCP request
                         },
-                        timeout=5.0
+                        timeout=5.0,
                     )
-                    logger.info(f"📦 Registered container ownership for {result['sandbox_id']}")
+                    logger.info(
+                        f"📦 Registered container ownership for {result['sandbox_id']} (request: {request_id})"
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to register container: {e}")
 
@@ -1034,32 +1146,112 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             if not sandbox_id or not code:
                 result_text = "❌ Error: Both sandbox_id and code are required"
-                log_request(name, arguments, result_text, "error")
+                await log_request(name, arguments, result_text, "error")
                 return [TextContent(type="text", text=result_text)]
 
-            result = await SandboxManager.execute_code(
-                sandbox_id, code, current_session_id
+            # Log request first to get request_id for linking LLM reviews
+            request_id = await log_request(
+                name,
+                {
+                    "sandbox_id": sandbox_id,
+                    "code_length": len(code),
+                    "auto_cleanup": auto_cleanup,
+                },
+                "",  # Will update with result later
+                "pending",
             )
+
+            # Link the existing container to this execute_python request
+            if REQUIRE_TOKEN and MCP_API_TOKEN:
+                try:
+                    await http_client.post(
+                        f"{DASHBOARD_URL}/api/containers/{sandbox_id}/link-request",
+                        headers={"X-API-Token": MCP_API_TOKEN},
+                        json={"mcp_request_id": request_id},
+                        timeout=5.0,
+                    )
+                    logger.info(
+                        f"🔗 Linked container {sandbox_id[:12]} to execute_python request {request_id}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to link container to request: {e}")
+
+            # Pass request_id to execute_code so it can link LLM reviews
+            # Catch LLM rejections and return them without executing
+            try:
+                result = await SandboxManager.execute_code(
+                    sandbox_id, code, current_session_id, request_id
+                )
+            except ValueError as e:
+                # LLM rejected the code - do not execute
+                error_str = str(e)
+                execution_time = time.time() - start_time
+
+                if (
+                    "SECURITY REJECTION" in error_str
+                    or "CODE REJECTED" in error_str
+                    or "🚫" in error_str
+                ):
+                    logger.error(
+                        f"🚫 Code rejected by LLM security filter for sandbox {sandbox_id}"
+                    )
+                    await update_request(
+                        request_id,
+                        status="rejected",
+                        result=error_str,
+                        execution_time=execution_time,
+                        error_message="Code rejected by LLM security filter",
+                    )
+                    return [TextContent(type="text", text=error_str)]
+                else:
+                    # Other validation errors
+                    logger.error(f"❌ Validation error: {error_str}")
+                    await update_request(
+                        request_id,
+                        status="error",
+                        result=error_str,
+                        execution_time=execution_time,
+                        error_message=str(e),
+                    )
+                    return [TextContent(type="text", text=f"❌ Error: {error_str}")]
 
             # Auto-cleanup if requested
             cleanup_message = ""
+            execution_time = time.time() - start_time
+
+            logger.info(
+                f"🧹 Auto-cleanup check: auto_cleanup={auto_cleanup}, status={result.get('status')}, request_id={request_id}"
+            )
+
             if auto_cleanup and result.get("status") != "crashed":
                 try:
                     # Trigger final ML analysis before deletion
                     if MONITORING_ENABLED:
                         monitor = get_monitor()
                         logger.info(
-                            f"Triggering final ML analysis for {sandbox_id} before deletion..."
+                            f"🔬 Triggering final ML analysis for {sandbox_id} (request: {request_id}) before deletion..."
                         )
                         try:
-                            # Get the container and do one final metrics collection + analysis
+                            # Get the container and do one final metrics collection
                             container = await asyncio.to_thread(
                                 docker_client.containers.get, sandbox_id
                             )
                             await monitor.collect_container_metrics(container)
-                            logger.info(f"Final ML analysis completed for {sandbox_id}")
+
+                            # Create final aggregated ML prediction linked to MCP request
+                            logger.info(
+                                f"📊 Creating final ML prediction for {sandbox_id} linked to request {request_id}"
+                            )
+                            await monitor.create_final_ml_prediction(
+                                sandbox_id, request_id
+                            )
+                            logger.info(
+                                f"✅ Final ML analysis completed for {sandbox_id}"
+                            )
                         except Exception as e:
-                            logger.warning(f"Failed to run final ML analysis: {e}")
+                            logger.warning(
+                                f"⚠️ Failed to run final ML analysis: {e}", exc_info=True
+                            )
 
                     await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
                     cleanup_message = (
@@ -1085,11 +1277,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                         output_parts.append(item["content"])
 
                 result_text = "\n".join(output_parts)
-                log_request(
-                    name,
-                    {"sandbox_id": sandbox_id, "code_length": len(code)},
-                    result_text,
-                    "crashed",
+                # Update request status to crashed
+                await update_request(
+                    request_id,
+                    status="crashed",
+                    result=result_text,
+                    execution_time=execution_time,
                 )
                 return [TextContent(type="text", text=result_text)]
 
@@ -1109,15 +1302,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     output_parts.append(f"⚠️  Stderr:\n{item['content']}")
 
             result_text = "\n\n".join(output_parts) + cleanup_message
-            log_request(
-                name,
-                {
-                    "sandbox_id": sandbox_id,
-                    "code_length": len(code),
-                    "auto_cleanup": auto_cleanup,
-                },
-                result_text,
-                "success",
+            # Update request status to success
+            await update_request(
+                request_id,
+                status="success",
+                result=result_text,
+                execution_time=execution_time,
             )
             return [TextContent(type="text", text=result_text)]
 
@@ -1433,26 +1623,32 @@ async def main():
     )
     logger.info(f"  📝 Request History: {os.path.abspath(HISTORY_FILE)}")
     logger.info(f"  📂 Working Directory: {os.getcwd()}")
-    
+
     # API Token authentication
     if REQUIRE_TOKEN:
-        logger.info(f"  🔐 API Token: {'Configured' if MCP_API_TOKEN else '❌ MISSING'}")
+        logger.info(
+            f"  🔐 API Token: {'Configured' if MCP_API_TOKEN else '❌ MISSING'}"
+        )
         logger.info(f"  🌐 Dashboard URL: {DASHBOARD_URL}")
-        
+
         if not MCP_API_TOKEN:
-            logger.error("❌ MCP_API_TOKEN environment variable is required when REQUIRE_TOKEN=true")
+            logger.error(
+                "❌ MCP_API_TOKEN environment variable is required when REQUIRE_TOKEN=true"
+            )
             logger.error("   Generate a token from the dashboard: /api/tokens/generate")
             return
-        
+
         # Validate token on startup
         logger.info("🔑 Validating API token...")
         validation = await validate_api_token(MCP_API_TOKEN)
-        
+
         if not validation.get("valid"):
-            logger.error(f"❌ Invalid API token: {validation.get('error', 'Unknown error')}")
+            logger.error(
+                f"❌ Invalid API token: {validation.get('error', 'Unknown error')}"
+            )
             logger.error("   Generate a new token from the dashboard")
             return
-        
+
         logger.info(f"✅ API token validated successfully")
         logger.info(f"   User: {validation.get('user_id')}")
         logger.info(f"   Token: {validation.get('token_name')}")

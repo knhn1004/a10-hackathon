@@ -9,11 +9,29 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Users are the central entity - each user can make MCP requests
+model users {
+  id             String           @id
+  githubId       String           @unique
+  username       String           @unique
+  email          String?
+  name           String?
+  avatarUrl      String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @default(now())
+  api_tokens     api_tokens[]
+  mcp_requests   mcp_requests[]
+
+  @@index([githubId])
+  @@index([username])
+}
+
+// API tokens for authentication - each has a nickname for easy identification
 model api_tokens {
   id          String    @id
   userId      String
   tokenHash   String    @unique
-  name        String
+  name        String    // Nickname for the token (e.g., "My Laptop", "Work Desktop")
   description String?
   active      Boolean   @default(true)
   usageCount  Int       @default(0)
@@ -26,23 +44,77 @@ model api_tokens {
   @@index([userId])
 }
 
+// MCP requests are the central entity - each request can spawn containers, trigger LLM reviews, etc.
+model mcp_requests {
+  id            String         @id
+  userId        String
+  tool          String         // create_sandbox, execute_python, execute_from_url, etc.
+  status        String         // success, error, rejected, crashed
+  sandboxId     String?        // The sandbox/container ID if applicable
+  codeLength    Int?
+  url           String?
+  resultPreview String?
+  errorMessage  String?
+  executionTime Float?
+  createdAt     DateTime       @default(now())
+  
+  // Relations
+  users         users          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  containers    containers[]   // All containers created by this request
+  llm_reviews   llm_reviews[]  // LLM reviews for this request
+  
+  @@index([userId])
+  @@index([sandboxId])
+  @@index([createdAt])
+  @@index([status])
+  @@index([tool])
+}
+
+// Containers track all containers (including dead ones) - linked to MCP request
+model containers {
+  id            String            @id
+  containerId   String            @unique
+  containerName String
+  sandboxId     String            @unique
+  mcpRequestId  String?           // Which MCP request created this container
+  userId        String            // Denormalized for easy querying
+  createdAt     DateTime          @default(now())
+  deletedAt     DateTime?
+  
+  // Relations
+  mcp_requests  mcp_requests?     @relation(fields: [mcpRequestId], references: [id], onDelete: SetNull)
+  ml_predictions ml_predictions[]
+  crashes       container_crashes[]
+  metrics       container_metrics[]
+  
+  @@index([containerId])
+  @@index([sandboxId])
+  @@index([userId])
+  @@index([mcpRequestId])
+}
+
+// Container crashes - linked to specific container
 model container_crashes {
-  id            String   @id
+  id            String     @id
   containerId   String
   containerName String
   exitCode      Int
   signal        String?
-  oomKilled     Boolean  @default(false)
+  oomKilled     Boolean    @default(false)
   stdout        String?
   stderr        String?
-  crashedAt     DateTime @default(now())
+  crashedAt     DateTime   @default(now())
+  
+  // Relations
+  container     containers? @relation(fields: [containerId], references: [containerId], onDelete: Cascade)
 
   @@index([containerId])
   @@index([crashedAt])
 }
 
+// Container metrics - time series data for containers
 model container_metrics {
-  id              String   @id
+  id              String     @id
   containerId     String
   containerName   String
   status          String
@@ -54,87 +126,65 @@ model container_metrics {
   networkTxBytes  BigInt
   blockReadBytes  BigInt
   blockWriteBytes BigInt
-  createdAt       DateTime @default(now())
+  createdAt       DateTime   @default(now())
+  
+  // Relations
+  container       containers? @relation(fields: [containerId], references: [containerId], onDelete: Cascade)
 
   @@index([containerId, createdAt])
   @@index([createdAt])
 }
 
-model containers {
-  id            String    @id
-  containerId   String    @unique
-  containerName String
-  userId        String
-  sandboxId     String    @unique
-  createdAt     DateTime  @default(now())
-  deletedAt     DateTime?
-  users         users     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([containerId])
-  @@index([sandboxId])
-  @@index([userId])
-}
-
+// LLM reviews - code safety reviews linked to MCP requests
 model llm_reviews {
-  id              String   @id
-  userId          String?
+  id              String        @id
+  mcpRequestId    String        // Which request triggered this review
   sandboxId       String
-  source          String
+  source          String        // execute_code, execute_from_url
   code            String
   codeLength      Int
-  decision        String
+  decision        String        // approve, reject, skipped
   confidence      Float
   threatsDetected String[]
   reasoning       String?
   reviewTime      Float
   modelUsed       String
-  createdAt       DateTime @default(now())
-  users           users?   @relation(fields: [userId], references: [id])
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  mcp_requests    mcp_requests  @relation(fields: [mcpRequestId], references: [id], onDelete: Cascade)
 
-  @@index([createdAt])
+  @@index([mcpRequestId])
+  @@index([sandboxId])
   @@index([decision])
-  @@index([sandboxId])
-  @@index([userId])
-}
-
-model mcp_requests {
-  id            String   @id
-  userId        String?
-  tool          String
-  status        String
-  sandboxId     String?
-  codeLength    Int?
-  url           String?
-  resultPreview String?
-  errorMessage  String?
-  executionTime Float?
-  createdAt     DateTime @default(now())
-  users         users?   @relation(fields: [userId], references: [id])
-
   @@index([createdAt])
-  @@index([sandboxId])
-  @@index([userId])
 }
 
+// ML predictions - mining/suspicious activity detection linked to containers
 model ml_predictions {
-  id            String   @id
-  userId        String?
+  id            String      @id
   containerId   String
   containerName String
-  prediction    String
+  mcpRequestId  String?     // Link to the MCP request that triggered this
+  prediction    String      // normal, suspicious, mining
   confidence    Float
   samples       Int
   duration      Float
   features      Json
-  createdAt     DateTime @default(now())
-  users         users?   @relation(fields: [userId], references: [id])
+  isFinal       Boolean     @default(false) // True if this is the final aggregated prediction
+  createdAt     DateTime    @default(now())
+  
+  // Relations
+  container     containers  @relation(fields: [containerId], references: [containerId], onDelete: Cascade)
 
   @@index([containerId])
-  @@index([createdAt])
+  @@index([mcpRequestId])
   @@index([prediction])
-  @@index([userId])
+  @@index([isFinal])
+  @@index([createdAt])
 }
 
+// System-wide metrics (not user-specific)
 model system_metrics {
   id                String   @id
   totalContainers   Int
@@ -144,20 +194,4 @@ model system_metrics {
   createdAt         DateTime @default(now())
 
   @@index([createdAt])
-}
-
-model users {
-  id             String           @id
-  githubId       String           @unique
-  username       String           @unique
-  email          String?
-  name           String?
-  avatarUrl      String?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @default(now())
-  api_tokens     api_tokens[]
-  containers     containers[]
-  llm_reviews    llm_reviews[]
-  mcp_requests   mcp_requests[]
-  ml_predictions ml_predictions[]
 }

@@ -98,8 +98,8 @@ python dashboard_server.py
 python mcp_server.py
 
 # You should see:
-# INFO:code-sandbox-mcp:🔓 API Token: Disabled
-# INFO:code-sandbox-mcp:Starting Code Sandbox MCP Server
+# INFO:code-sandbox:🔓 API Token: Disabled
+# INFO:code-sandbox:Starting Code Sandbox MCP Server
 ```
 
 ### 6. Access Dashboard
@@ -201,8 +201,8 @@ echo "REQUIRE_TOKEN=\"true\"" >> .env
 python mcp_server.py
 
 # You should see:
-# INFO:code-sandbox-mcp:🔐 API Token: Configured
-# INFO:code-sandbox-mcp:✅ API token validated successfully
+# INFO:code-sandbox:🔐 API Token: Configured
+# INFO:code-sandbox:✅ API token validated successfully
 ```
 
 ## Environment Variables Reference

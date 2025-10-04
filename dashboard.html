@@ -522,6 +522,12 @@
             color: var(--warning-color);
         }
 
+        .status-rejected {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            font-weight: 600;
+        }
+
         .request-preview {
             color: var(--text-secondary);
             font-size: 0.9rem;
@@ -594,12 +600,26 @@
         </div>
     </div>
 
+    <!-- ML Wave - Always Visible -->
+    <div class="chart-card" id="ml-wave-section" style="display: none; margin-bottom: 30px;">
+        <div class="chart-title">🌊 Live ML Prediction Wave</div>
+        <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 16px;">
+            <div style="position: relative; height: 300px;">
+                <canvas id="ml-wave-canvas" style="width: 100%; height: 100%;"></canvas>
+            </div>
+            <div id="ml-wave-legend" style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8; text-align: center;">
+                <span style="color: #10b981;">● Normal</span>
+                <span style="color: #f59e0b; margin-left: 16px;">● Suspicious</span>
+                <span style="color: #ef4444; margin-left: 16px;">● Mining</span>
+                <span style="margin-left: 24px;">Real-time LSTM confidence</span>
+            </div>
+        </div>
+    </div>
+
     <!-- Tabs -->
         <div class="tabs" id="tabs" style="display: none;">
         <button class="tab active" onclick="switchTab('containers')">Active Containers</button>
             <button class="tab" onclick="switchTab('requests')">MCP Requests</button>
-            <button class="tab" onclick="switchTab('ml')">ML Model</button>
-            <button class="tab" onclick="switchTab('llm')">LLM Reviews</button>
             <button class="tab" onclick="switchTab('tokens')">API Tokens</button>
     </div>
 
@@ -615,28 +635,6 @@
         <div class="tab-content" id="requests-tab">
             <h2 class="section-title">MCP Function Calls</h2>
             <div id="requests-list"></div>
-        </div>
-
-        <!-- ML Model Tab -->
-        <div class="tab-content" id="ml-tab">
-            <h2 class="section-title">🌊 Live Prediction Wave</h2>
-            <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-                <canvas id="ml-wave-canvas" width="800" height="200" style="width: 100%; height: 200px;"></canvas>
-                <div id="ml-wave-legend" style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">
-                    <span style="color: #10b981;">● Normal</span>
-                    <span style="color: #f59e0b; margin-left: 16px;">● Suspicious</span>
-                    <span style="color: #ef4444; margin-left: 16px;">● Mining</span>
-                    <span style="margin-left: 24px;">Real-time LSTM confidence</span>
-                </div>
-            </div>
-            <h2 class="section-title">ML Classification History</h2>
-            <div id="ml-classifications"></div>
-        </div>
-
-        <!-- LLM Reviews Tab -->
-        <div class="tab-content" id="llm-tab">
-            <h2 class="section-title">Ollama Code Analysis</h2>
-            <div id="llm-reviews-list"></div>
         </div>
 
         <!-- API Tokens Tab -->
@@ -809,6 +807,7 @@
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('stats-grid').style.display = 'grid';
                 document.getElementById('charts-container').style.display = 'grid';
+                document.getElementById('ml-wave-section').style.display = 'block';
                 document.getElementById('tabs').style.display = 'flex';
                 document.getElementById('tab-contents').style.display = 'block';
 
@@ -842,7 +841,7 @@
             }
         }
 
-        // Display MCP requests
+        // Display MCP requests with hierarchical structure
         function displayMCPRequests(requests) {
             const container = document.getElementById('requests-list');
             
@@ -858,7 +857,7 @@
                 item.className = 'request-item';
 
                 const timestamp = new Date(req.timestamp * 1000);
-                const timeStr = timestamp.toLocaleTimeString();
+                const timeStr = timestamp.toLocaleString();
                 
                 // Status class
                 const statusClass = `status-${req.status}`;
@@ -867,25 +866,96 @@
                 let argsStr = '';
                 if (req.arguments) {
                     if (req.arguments.sandbox_id) {
-                        argsStr = `sandbox: ${req.arguments.sandbox_id}`;
+                        argsStr = `sandbox: ${req.arguments.sandbox_id.substring(0, 12)}`;
                     }
                     if (req.arguments.code_length) {
                         argsStr += ` • code: ${req.arguments.code_length} bytes`;
                     }
                     if (req.arguments.url) {
-                        argsStr += ` • url: ${req.arguments.url}`;
+                        argsStr += ` • url: ${req.arguments.url.substring(0, 50)}...`;
                     }
+                }
+
+                // Build related data sections
+                let relatedDataHTML = '';
+
+                // LLM Reviews
+                if (req.llm_reviews && req.llm_reviews.length > 0) {
+                    relatedDataHTML += '<div style="margin-top: 12px; padding: 10px; background: rgba(59, 130, 246, 0.1); border-left: 3px solid var(--primary-color); border-radius: 4px;">';
+                    relatedDataHTML += '<strong>🛡️ LLM Review:</strong> ';
+                    req.llm_reviews.forEach((review, idx) => {
+                        // Determine color based on decision
+                        let decisionColor = '#10b981'; // approve/normal - green
+                        if (review.decision === 'reject') {
+                            decisionColor = '#ef4444'; // reject - red
+                        } else if (review.decision === 'skipped' || review.confidence === 0) {
+                            decisionColor = '#f59e0b'; // skipped/error - yellow
+                        }
+                        
+                        relatedDataHTML += `<span style="color: ${decisionColor};">${review.decision}</span> (${(review.confidence * 100).toFixed(0)}% conf) `;
+                        if (review.threats_detected && review.threats_detected.length > 0 && review.threats_detected[0] !== '') {
+                            relatedDataHTML += `⚠️ ${review.threats_detected.join(', ')} `;
+                        }
+                        relatedDataHTML += `• ${review.model_used}`;
+                    });
+                    relatedDataHTML += '</div>';
+                }
+
+                // Final ML Prediction (aggregated result)
+                let hasFinalPrediction = false;
+                if (req.containers && req.containers.length > 0) {
+                    req.containers.forEach((cont) => {
+                        if (cont.ml_predictions && cont.ml_predictions.length > 0) {
+                            const finalPred = cont.ml_predictions[0]; // Only final predictions are included
+                            const predColor = finalPred.prediction === 'mining' ? '#ef4444' : (finalPred.prediction === 'suspicious' ? '#f59e0b' : '#10b981');
+                            const predIcon = finalPred.prediction === 'mining' ? '⛏️' : (finalPred.prediction === 'suspicious' ? '⚠️' : '✅');
+                            
+                            relatedDataHTML += '<div style="margin-top: 12px; padding: 10px; background: rgba(139, 92, 246, 0.1); border-left: 3px solid #8b5cf6; border-radius: 4px;">';
+                            relatedDataHTML += `<strong>🤖 ML Analysis:</strong> `;
+                            relatedDataHTML += `<span style="color: ${predColor}; font-weight: 600;">${predIcon} ${finalPred.prediction.toUpperCase()}</span> `;
+                            relatedDataHTML += `(${(finalPred.confidence * 100).toFixed(0)}% confidence, ${finalPred.samples} samples)`;
+                            relatedDataHTML += '</div>';
+                            hasFinalPrediction = true;
+                        }
+                    });
+                }
+
+                // Containers (simplified - no need to repeat ML prediction)
+                if (req.containers && req.containers.length > 0) {
+                    relatedDataHTML += '<div style="margin-top: 12px; padding: 10px; background: rgba(16, 185, 129, 0.1); border-left: 3px solid var(--success-color); border-radius: 4px;">';
+                    relatedDataHTML += '<strong>📦 Containers:</strong><br>';
+                    req.containers.forEach((cont, idx) => {
+                        const statusIcon = cont.status === 'deleted' ? '💀' : '✅';
+                        relatedDataHTML += `<div style="margin-top: 6px; margin-left: 16px;">`;
+                        relatedDataHTML += `${statusIcon} ${cont.sandbox_id.substring(0, 12)} (${cont.status})`;
+                        
+                        // Crashes
+                        if (cont.crashes && cont.crashes.length > 0) {
+                            const crash = cont.crashes[0];
+                            relatedDataHTML += `<br><span style="margin-left: 16px; color: #ef4444;">💥 Crashed: exit ${crash.exit_code}${crash.oom_killed ? ' (OOM)' : ''}</span>`;
+                        }
+                        
+                        relatedDataHTML += `</div>`;
+                    });
+                    relatedDataHTML += '</div>';
+                }
+
+                // Token used (show nickname if available)
+                let tokenInfo = '';
+                if (req.user && req.user.username) {
+                    tokenInfo = `<span style="color: var(--text-secondary); font-size: 0.85rem;">👤 ${req.user.username}</span>`;
                 }
 
                 item.innerHTML = `
                     <div class="request-header">
                         <div>
-                            <div class="request-tool">${req.tool}</div>
+                            <div class="request-tool">${req.tool} ${tokenInfo}</div>
                             <div class="request-time">${timeStr}${argsStr ? ' • ' + argsStr : ''}</div>
                         </div>
                         <span class="request-status ${statusClass}">${req.status}</span>
                     </div>
-                    ${req.result_preview ? `<div class="request-preview">${req.result_preview}</div>` : ''}
+                    ${req.result_preview ? `<div class="request-preview">${req.result_preview.substring(0, 200)}${req.result_preview.length > 200 ? '...' : ''}</div>` : ''}
+                    ${relatedDataHTML}
                 `;
 
                 container.appendChild(item);
@@ -907,11 +977,6 @@
             // Load MCP requests if switching to that tab
             if (tabName === 'requests') {
                 updateMCPRequests();
-            } else if (tabName === 'ml') {
-                drawMLWave();  // Draw live wave first
-                updateMLClassifications();
-            } else if (tabName === 'llm') {
-                updateLLMReviews();
             } else if (tabName === 'tokens') {
                 updateTokensList();
             }
@@ -1345,24 +1410,21 @@
 
             initCharts();
             updateDashboard();
+            
+            // Initial ML wave draw
+            drawMLWave();
 
             // Update every 2 seconds
             updateInterval = setInterval(() => {
                 updateDashboard();
                 
+                // Always update ML wave (it's always visible at the top)
+                drawMLWave();
+                
                 // Also update MCP requests if on that tab
                 const requestsTab = document.getElementById('requests-tab');
                 if (requestsTab && requestsTab.classList.contains('active')) {
                     updateMCPRequests();
-                }
-                const mlTab = document.getElementById('ml-tab');
-                if (mlTab && mlTab.classList.contains('active')) {
-                    drawMLWave();  // Redraw wave in real-time
-                    updateMLClassifications();
-                }
-                const llmTab = document.getElementById('llm-tab');
-                if (llmTab && llmTab.classList.contains('active')) {
-                    updateLLMReviews();
                 }
             }, 2000);
         };
@@ -1382,6 +1444,11 @@
         async function drawMLWave() {
             const canvas = document.getElementById('ml-wave-canvas');
             if (!canvas || !canvas.getContext) return;
+            
+            // Set canvas size to match its display size (prevents stretching)
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
             
             const ctx = canvas.getContext('2d');
             const width = canvas.width;

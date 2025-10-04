@@ -237,7 +237,7 @@ class ContainerMonitor:
         self.container_stats_sequences: Dict[str, Deque[Dict]] = (
             {}
         )  # Container ID -> sequence of raw stats
-        
+
         # HTTP client for API calls
         self.http_client = httpx.AsyncClient(timeout=5.0)
         self.dashboard_url = os.getenv("DASHBOARD_URL", "http://localhost:8080")
@@ -981,7 +981,7 @@ class ContainerMonitor:
                 )
 
             self.ml_predictions.append(ml_prediction_record)
-            
+
             # Also write to database via API
             asyncio.create_task(self._save_ml_prediction_to_db(ml_prediction_record))
 
@@ -1494,31 +1494,161 @@ class ContainerMonitor:
         else:
             # Return all active time series
             return [asdict(series) for series in self.ml_time_series.values()]
-    
+
+    async def create_final_ml_prediction(
+        self, container_id: str, mcp_request_id: str = None
+    ):
+        """Create a final aggregated ML prediction for a container after execution completes.
+
+        Args:
+            container_id: Container ID to analyze
+            mcp_request_id: MCP request ID to link the prediction to
+        """
+        logger.info(
+            f"🎯 create_final_ml_prediction called for container {container_id[:12]}, request: {mcp_request_id}"
+        )
+        try:
+            # Get all metrics for this container
+            history = self.metrics_history.get(container_id, [])
+            logger.info(f"   📈 Metrics history: {len(history)} samples")
+
+            # Get container info (try from history, fallback to container ID)
+            if history:
+                container_name = history[-1].name
+            else:
+                # Try to get container name from Docker
+                try:
+                    container = await asyncio.to_thread(
+                        self.docker_client.containers.get, container_id
+                    )
+                    container_name = container.name
+                except:
+                    container_name = container_id
+
+            # Use the most recent prediction from time series if available
+            if container_id in self.ml_time_series:
+                series = self.ml_time_series[container_id]
+                if series.predictions:
+                    # Take the most confident prediction from the series
+                    max_conf_idx = series.confidences.index(max(series.confidences))
+                    prediction = series.predictions[max_conf_idx]
+                    confidence = series.confidences[max_conf_idx]
+                    features = (
+                        series.features_history[max_conf_idx]
+                        if max_conf_idx < len(series.features_history)
+                        else {}
+                    )
+                    samples = len(series.predictions)
+                else:
+                    # No predictions yet, default to normal
+                    prediction = "normal"
+                    confidence = 0.5
+                    features = {}
+                    samples = len(history) if history else 0
+            else:
+                # No time series, default to normal (fast execution, not enough monitoring data)
+                logger.info(
+                    f"⚠️ No ML predictions yet for {container_id[:12]} (execution was too fast), defaulting to 'normal'"
+                )
+                prediction = "normal"
+                confidence = 0.5
+                features = {}
+                samples = len(history) if history else 0
+
+            # Calculate duration
+            if history and len(history) >= 2:
+                duration = history[-1].timestamp - history[0].timestamp
+            else:
+                duration = 0.1  # Default to 0.1s for fast execution
+
+            features["execution_duration"] = duration
+            features["total_samples"] = samples
+
+            # Look up container owner
+            logger.info(
+                f"🔍 Looking up owner for final prediction: {container_id[:12]}"
+            )
+            response = await self.http_client.get(
+                f"{self.dashboard_url}/api/containers/{container_id}/owner"
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    f"❌ Container owner lookup failed: {response.status_code}"
+                )
+                return
+
+            owner_data = response.json()
+            if not owner_data.get("found"):
+                logger.warning(f"❌ No owner for container {container_id[:12]}")
+                return
+
+            user_id = owner_data.get("user_id")
+            logger.info(f"✅ Found owner: {user_id}")
+
+            # Save final prediction to database
+            logger.info(
+                f"💾 Saving final ML prediction to database: {prediction} ({confidence:.0%}), is_final=True, mcp_request_id={mcp_request_id}"
+            )
+            save_response = await self.http_client.post(
+                f"{self.dashboard_url}/api/ml/predictions/log",
+                headers={"X-Monitor-Internal": "true"},
+                json={
+                    "container_id": container_id,
+                    "container_name": container_name,
+                    "mcp_request_id": mcp_request_id,
+                    "prediction": prediction,
+                    "confidence": confidence,
+                    "samples": samples,
+                    "duration": duration,
+                    "features": features,
+                    "is_final": True,  # Mark as final prediction
+                    "user_id_override": user_id,
+                },
+            )
+
+            if save_response.status_code == 200:
+                logger.info(
+                    f"✅ Final ML prediction saved: {prediction} ({confidence:.0%}) for request {mcp_request_id}"
+                )
+            else:
+                logger.error(
+                    f"❌ Failed to save final prediction: {save_response.status_code}"
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create final ML prediction: {e}", exc_info=True)
+
     async def _save_ml_prediction_to_db(self, prediction: MLPrediction):
         """Save ML prediction to database via dashboard API."""
         try:
             # Look up container owner
-            logger.info(f"🔍 Looking up owner for container {prediction.container_id[:12]}")
+            logger.info(
+                f"🔍 Looking up owner for container {prediction.container_id[:12]}"
+            )
             response = await self.http_client.get(
                 f"{self.dashboard_url}/api/containers/{prediction.container_id}/owner"
             )
-            
+
             if response.status_code != 200:
-                logger.warning(f"❌ Container {prediction.container_id[:12]} owner lookup failed: {response.status_code}")
+                logger.warning(
+                    f"❌ Container {prediction.container_id[:12]} owner lookup failed: {response.status_code}"
+                )
                 return
-            
+
             owner_data = response.json()
             if not owner_data.get("found"):
-                logger.warning(f"❌ No owner for container {prediction.container_id[:12]}")
+                logger.warning(
+                    f"❌ No owner for container {prediction.container_id[:12]}"
+                )
                 return
-            
+
             user_id = owner_data.get("user_id")
             logger.info(f"✅ Found owner for {prediction.container_id[:12]}: {user_id}")
-            
-            # Calculate duration from features  
-            duration = prediction.features.get('execution_duration', 0.0)
-            
+
+            # Calculate duration from features
+            duration = prediction.features.get("execution_duration", 0.0)
+
             # Write prediction to database (monitor is trusted internal call)
             save_response = await self.http_client.post(
                 f"{self.dashboard_url}/api/ml/predictions/log",
@@ -1531,15 +1661,20 @@ class ContainerMonitor:
                     "samples": prediction.samples,
                     "duration": duration,
                     "features": prediction.features,
+                    "is_final": False,  # Intermediate predictions
                     "user_id_override": user_id,
-                }
+                },
             )
-            
+
             if save_response.status_code == 200:
-                logger.info(f"📊 ML prediction saved to DB: {prediction.prediction} ({prediction.confidence:.0%}) for user {user_id}")
+                logger.info(
+                    f"📊 ML prediction saved to DB: {prediction.prediction} ({prediction.confidence:.0%}) for user {user_id}"
+                )
             else:
-                logger.error(f"❌ Failed to save ML prediction: {save_response.status_code} - {save_response.text}")
-            
+                logger.error(
+                    f"❌ Failed to save ML prediction: {save_response.status_code} - {save_response.text}"
+                )
+
         except Exception as e:
             logger.error(f"❌ Failed to save ML prediction to DB: {e}", exc_info=True)
 

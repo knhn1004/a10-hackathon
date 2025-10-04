@@ -15,7 +15,7 @@ Perfect for when you want Claude to perform calculations, data analysis, or crea
 
 ## 📋 Available Tools
 
-The MCP server exposes 7 tools to Claude:
+The code-sandbox server exposes 7 tools to Claude:
 
 1. **`create_sandbox`** - Create a new isolated Python environment
 2. **`execute_python`** - Run Python code (with numpy, pandas, matplotlib)
@@ -27,12 +27,12 @@ The MCP server exposes 7 tools to Claude:
 
 ## Architecture
 
-- **MCP Server** (`mcp_server.py`): STDIO-based MCP server that orchestrates sandboxes
+- **Code Sandbox** (`mcp_server.py`): STDIO-based MCP server that orchestrates sandboxes
 - **Sandbox Server** (`sandbox_server.py`): Runs inside Docker containers, executes Python code
 - **Docker**: Provides isolation, resource limits, and security
 
 ```
-Claude Desktop → MCP Server → Docker Containers → Code Execution
+Claude Desktop → Code Sandbox → Docker Containers → Code Execution
 ```
 
 ## Features

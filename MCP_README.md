@@ -8,7 +8,7 @@ A secure **Model Context Protocol (MCP)** server for executing Python code in is
 
 ## 🔧 Tools Exposed
 
-The MCP server provides 4 tools:
+The code-sandbox server provides 7 tools:
 
 ### 1. `create_sandbox`
 Creates a new isolated Python execution environment.
@@ -72,7 +72,7 @@ poetry install
 # Build the sandbox Docker image
 docker build -t code-sandbox:latest .
 
-# Test the MCP server
+# Test the code-sandbox server
 poetry run python mcp_server.py
 ```
 
