@@ -71,12 +71,25 @@ MAX_SANDBOXES = int(os.getenv("MAX_SANDBOXES", "10"))
 CHECK_INTERVAL = 60
 
 # API Token configuration (per-user, from local environment)
-MCP_API_TOKEN = os.getenv("MCP_API_TOKEN")  # User's personal token
+MCP_API_TOKEN = os.getenv("MCP_API_TOKEN")  # Dashboard-generated token
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8080")
-REQUIRE_TOKEN = True  # Always required
+REQUIRE_TOKEN = os.getenv("REQUIRE_TOKEN", "true").lower() == "true"
 
-# Note: MCP_API_TOKEN is set by each user locally, not on the server!
-# Users generate tokens from the dashboard and configure them locally.
+# How to use the SAME dashboard token for both integrations:
+#
+# 1. Claude Desktop (stdio MCP):
+#    - Generate token from dashboard (http://localhost:8080)
+#    - Set MCP_API_TOKEN=your_token in environment
+#    - Configure claude_desktop_config.json to use this script
+#
+# 2. ChatGPT (HTTP via mcpo):
+#    - Use the SAME token from dashboard
+#    - Run: ./run_mcpo.sh (with MCP_API_TOKEN set)
+#    - In ChatGPT Custom GPT Actions, configure:
+#      * Authentication: "Bearer Token" or "API Key"
+#      * Header: Authorization: Bearer YOUR_TOKEN
+#    - ChatGPT sends token in HTTP headers
+#    - Token validates against dashboard (same validation as Claude)
 
 # URL fetching configuration
 MAX_CODE_SIZE = 1024 * 1024  # 1MB max code size
@@ -1635,11 +1648,14 @@ async def main():
             logger.error(
                 "❌ MCP_API_TOKEN environment variable is required when REQUIRE_TOKEN=true"
             )
-            logger.error("   Generate a token from the dashboard: /api/tokens/generate")
+            logger.error(
+                "   Generate a token from the dashboard: http://localhost:8080"
+            )
+            logger.error("   Then set: export MCP_API_TOKEN=your_token")
             return
 
         # Validate token on startup
-        logger.info("🔑 Validating API token...")
+        logger.info("🔑 Validating API token with dashboard...")
         validation = await validate_api_token(MCP_API_TOKEN)
 
         if not validation.get("valid"):
@@ -1652,6 +1668,7 @@ async def main():
         logger.info(f"✅ API token validated successfully")
         logger.info(f"   User: {validation.get('user_id')}")
         logger.info(f"   Token: {validation.get('token_name')}")
+        logger.info(f"   💡 This same token works for both Claude & ChatGPT!")
     else:
         logger.info(f"  🔓 API Token: Disabled (set REQUIRE_TOKEN=true to enable)")
 

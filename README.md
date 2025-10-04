@@ -1,17 +1,19 @@
 # Code Sandbox MCP Server
 
-A **Model Context Protocol (MCP) server** that provides secure Python code execution in isolated Docker containers for LLM agents like Claude. Based on [this article](https://amirmalik.net/2025/03/07/code-sandboxes-for-llm-ai-agents).
+A **Model Context Protocol (MCP) server** that provides secure Python code execution in isolated Docker containers for LLM agents like Claude and ChatGPT. Based on [this article](https://amirmalik.net/2025/03/07/code-sandboxes-for-llm-ai-agents).
 
 ## 🎯 What is this?
 
-An MCP server that gives Claude (and other MCP clients) the ability to:
+An MCP server that gives **Claude, ChatGPT, and other AI assistants** the ability to:
 
 - Create isolated Python execution environments
 - Run Python code securely in Docker containers
 - Generate matplotlib visualizations
 - Perform data analysis with numpy/pandas
 
-Perfect for when you want Claude to perform calculations, data analysis, or create charts!
+Perfect for when you want AI assistants to perform calculations, data analysis, or create charts!
+
+**🆕 Now supports ChatGPT!** Use the same authentication token for both Claude (stdio MCP) and ChatGPT (HTTP via mcpo). See [CHATGPT_SETUP.md](CHATGPT_SETUP.md) for details.
 
 ## 📋 Available Tools
 
@@ -27,13 +29,24 @@ The code-sandbox server exposes 7 tools to Claude:
 
 ## Architecture
 
-- **Code Sandbox** (`mcp_server.py`): STDIO-based MCP server that orchestrates sandboxes
+- **Code Sandbox** (`mcp_server.py`): MCP server that orchestrates sandboxes (stdio for Claude, HTTP for ChatGPT)
 - **Sandbox Server** (`sandbox_server.py`): Runs inside Docker containers, executes Python code
 - **Docker**: Provides isolation, resource limits, and security
+- **mcpo Proxy** (`run_mcpo.sh`): Exposes MCP server as HTTP/OpenAPI for ChatGPT integration
 
 ```
-Claude Desktop → Code Sandbox → Docker Containers → Code Execution
+┌─────────────┐           ┌──────────────┐
+│   Claude    │──stdio──→ │              │
+│  Desktop    │           │ Code Sandbox │──→ Docker → Python
+└─────────────┘           │ (mcp_server) │
+                          │              │
+┌─────────────┐           │              │
+│  ChatGPT    │──HTTP───→ │  (+ mcpo)    │
+│ Custom GPT  │           │              │
+└─────────────┘           └──────────────┘
 ```
+
+**One Token, Two Integrations**: Both Claude and ChatGPT use the same authentication token from your dashboard!
 
 ## Features
 
@@ -110,6 +123,40 @@ poetry env info -p
 4. **Restart Claude Desktop** and you'll see the code sandbox tools! 🎉
 
 See [MCP_README.md](MCP_README.md) for detailed integration instructions.
+
+### 🤖 ChatGPT Integration (NEW!)
+
+Use the same MCP server with ChatGPT Custom GPTs:
+
+1. **Generate a token from the dashboard** (see below)
+2. **Install Cloudflare Tunnel (one-time):**
+
+```bash
+brew install cloudflared  # macOS
+# or download for Linux/Windows
+```
+
+3. **Start with Cloudflare Tunnel (all-in-one!):**
+
+```bash
+export MCP_API_TOKEN="your_token_from_dashboard"
+./run_with_cloudflare.sh
+```
+
+This will:
+- Start your MCP server
+- Create a public HTTPS URL via Cloudflare (free!)
+- Show you the URL to use in ChatGPT
+
+4. **Configure ChatGPT Custom GPT:**
+   - Go to https://chat.openai.com
+   - Create a Custom GPT → Actions
+   - Import OpenAPI: `https://your-tunnel-url/openapi.json`
+   - Authentication: Bearer Token → Use your `MCP_API_TOKEN`
+
+**The same dashboard token works for both Claude & ChatGPT!** 🎉
+
+See [CHATGPT_SETUP.md](CHATGPT_SETUP.md) for detailed instructions, [CLOUDFLARE_TUNNEL_SETUP.md](CLOUDFLARE_TUNNEL_SETUP.md) for tunnel setup, and [QUICK_CHATGPT_GUIDE.txt](QUICK_CHATGPT_GUIDE.txt) for a quick reference.
 
 ### Observability Dashboard
 
