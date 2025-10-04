@@ -471,27 +471,48 @@ class TemporalDetectorInference:
             logits, attention = self.model(numerical, categorical)
             probabilities = F.softmax(logits, dim=-1)
 
-            # Get all class probabilities
-            normal_prob = probabilities[0, 0].item()
-            suspicious_prob = probabilities[0, 1].item()
-            mining_prob = probabilities[0, 2].item()
-
             predicted_class = torch.argmax(probabilities, dim=-1).item()
             confidence = probabilities[0, predicted_class].item()
+            
+            # Handle both 2-class (normal/attack) and 3-class (normal/suspicious/mining) models
+            num_classes = probabilities.size(1)
+            
+            if num_classes == 2:
+                # Binary classification: normal (0) vs mining (1)
+                normal_prob = probabilities[0, 0].item()
+                mining_prob = probabilities[0, 1].item()
+                
+                if predicted_class == 0:
+                    prediction = "normal"
+                else:
+                    prediction = "mining"
+                    
+                # If confidence is low, default to normal
+                if confidence < 0.50:
+                    prediction = "normal"
+                    confidence = max(normal_prob, 1 - mining_prob)
+                    
+            elif num_classes == 3:
+                # Ternary classification: normal/suspicious/mining
+                normal_prob = probabilities[0, 0].item()
+                suspicious_prob = probabilities[0, 1].item()
+                mining_prob = probabilities[0, 2].item()
 
-        # Convert class to label
-        class_labels = ["normal", "suspicious", "mining"]
-        prediction = class_labels[predicted_class]
+                class_labels = ["normal", "suspicious", "mining"]
+                prediction = class_labels[predicted_class]
 
-        # If confidence is low (< 50%), treat as normal unless mining is high
-        # This prevents random low-confidence predictions from being trusted
-        if confidence < 0.50:
-            if mining_prob > 0.40:  # Only trust mining if probability > 40%
-                prediction = "mining"
-                confidence = mining_prob
+                # If confidence is low (< 50%), treat as normal unless mining is high
+                if confidence < 0.50:
+                    if mining_prob > 0.40:  # Only trust mining if probability > 40%
+                        prediction = "mining"
+                        confidence = mining_prob
+                    else:
+                        prediction = "normal"
+                        confidence = max(normal_prob, 1 - suspicious_prob - mining_prob)
             else:
+                # Unknown number of classes, default to normal
                 prediction = "normal"
-                confidence = max(normal_prob, 1 - suspicious_prob - mining_prob)
+                confidence = 0.5
 
         # Convert attention to dict
         attention_dict = {
@@ -505,12 +526,28 @@ class TemporalDetectorInference:
         """Load trained model from file."""
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
-            self.model = TemporalContainerDetector().to(self.device)
+            
+            # Extract architecture info from checkpoint
+            num_classes = checkpoint.get("num_classes", 3)  # Default to 3 for new models
+            categorical_dims = checkpoint.get("categorical_dims", {
+                "status": 5,
+                "restart_policy": 4,
+                "network_mode": 4,
+            })
+            numerical_dim = checkpoint.get("numerical_dim", 15)
+            
+            # Create model with correct architecture
+            self.model = TemporalContainerDetector(
+                numerical_dim=numerical_dim,
+                categorical_dims=categorical_dims,
+                num_classes=num_classes
+            ).to(self.device)
             self.model.load_state_dict(checkpoint["model_state_dict"])
             self.model.eval()
-            logger.info(f"Loaded temporal model from {model_path}")
+            logger.info(f"Loaded temporal model from {model_path} (classes={num_classes})")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
+            logger.info("Using default initialized model instead")
             self.model = TemporalContainerDetector().to(self.device)
             self.model.eval()
 
