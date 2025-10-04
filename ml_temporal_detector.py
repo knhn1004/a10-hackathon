@@ -281,12 +281,15 @@ class TemporalDetectorInference:
             numerical_features: (1, seq_len, numerical_dim) tensor
             categorical_features: Dict of (1, seq_len) tensors
         """
+        # No padding - caller must provide exactly SEQUENCE_LENGTH samples
+        # Padding creates artificial data that doesn't represent real execution
         if len(stats_sequence) < SEQUENCE_LENGTH:
-            # Pad sequence if too short
-            while len(stats_sequence) < SEQUENCE_LENGTH:
-                stats_sequence.append(stats_sequence[-1] if stats_sequence else {})
+            raise ValueError(
+                f"Insufficient samples: got {len(stats_sequence)}, need {SEQUENCE_LENGTH}. "
+                f"Ensure monitor collects enough data before prediction."
+            )
 
-        # Truncate if too long
+        # Truncate if too long (use most recent samples)
         stats_sequence = stats_sequence[-SEQUENCE_LENGTH:]
 
         numerical_features_list = []

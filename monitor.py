@@ -234,6 +234,7 @@ class ContainerMonitor:
         )  # Cache recent logs for pattern detection
 
         # Store raw stats sequences for temporal model
+        # Need 10 seconds of data at 50Hz = 500 samples
         self.container_stats_sequences: Dict[str, Deque[Dict]] = (
             {}
         )  # Container ID -> sequence of raw stats
@@ -294,10 +295,10 @@ class ContainerMonitor:
                 )
                 return None
 
-            # Store raw stats for temporal model (keep last 10 for sequence)
+            # Store raw stats for temporal model (keep last 500 = 10 seconds at 50Hz)
             container_id = container.id[:12]
             if container_id not in self.container_stats_sequences:
-                self.container_stats_sequences[container_id] = deque(maxlen=10)
+                self.container_stats_sequences[container_id] = deque(maxlen=500)
             self.container_stats_sequences[container_id].append(stats)
 
             # Parse CPU usage
@@ -871,6 +872,14 @@ class ContainerMonitor:
 
         Analyzes sequences of Docker stats to detect temporal anomalies.
         Creates wave graph data showing confidence over time.
+        
+        IMPORTANT: Model trained on 10 samples @ 1Hz (10 seconds).
+        Monitor collects at 50Hz, so we need 500 samples = 10 seconds.
+        We downsample to 10 samples before prediction to match training data.
+        
+        Predictions:
+        - Intermediate: Made every 10 seconds during execution, is_final=False
+        - Final: Made once after container stops, is_final=True (aggregated)
 
         Returns alert if high-confidence mining detected, None otherwise.
         """
@@ -898,15 +907,34 @@ class ContainerMonitor:
 
         # Use stats sequence for temporal model
         stats_sequence = self.container_stats_sequences.get(container_id, deque())
-        # With 50 samples/sec, we get 3 samples in 60ms - good for fast code
+        # Need 10 seconds of data at 50 samples/sec = 500 samples minimum
+        # This matches the model's training data (10 samples at 1Hz = 10 seconds)
+        MIN_SAMPLES_FOR_PREDICTION = 500  # 10 seconds * 50 Hz
         logger.info(
-            f"🔍 Checking temporal for {metrics.name}: {len(stats_sequence)} samples in sequence"
+            f"🔍 Checking temporal for {metrics.name}: {len(stats_sequence)}/{MIN_SAMPLES_FOR_PREDICTION} samples"
         )
-        if len(stats_sequence) < 2:  # Need at least 2 samples
+        if len(stats_sequence) < MIN_SAMPLES_FOR_PREDICTION:
             logger.info(
-                f"⚠️ Not enough samples for {metrics.name}: {len(stats_sequence)}/2"
+                f"⚠️ Not enough samples for {metrics.name}: {len(stats_sequence)}/{MIN_SAMPLES_FOR_PREDICTION}"
             )
             return None
+        
+        # Downsample: 500 samples @ 50Hz → 10 samples @ 1Hz (aggregate every 50 samples)
+        # Model expects 10 samples representing 10 seconds
+        downsampled_stats = []
+        samples_per_second = 50  # COLLECTION_INTERVAL = 0.02 = 50Hz
+        
+        for i in range(0, len(stats_sequence), samples_per_second):
+            # Take one sample every second (every 50 raw samples)
+            # Use the middle sample of each second for stability
+            sample_idx = min(i + samples_per_second // 2, len(stats_sequence) - 1)
+            downsampled_stats.append(stats_sequence[sample_idx])
+            
+            if len(downsampled_stats) >= 10:  # Model needs exactly 10 samples
+                break
+        
+        # Use downsampled stats for prediction
+        stats_sequence = downsampled_stats[-10:]  # Last 10 seconds
 
         try:
             # Run temporal model inference
