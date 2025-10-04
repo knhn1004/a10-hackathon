@@ -62,3 +62,7 @@ package-lock.json
 
 # Models (ML)
 models/
+
+# Training artifacts
+*.png
+training_log.txt
