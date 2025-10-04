@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8080")
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")  # Host to bind to
-PROXY_PORT = int(os.getenv("PROXY_PORT", "6000"))  # Port to bind to
+PROXY_PORT = int(os.getenv("PROXY_PORT", "8001"))  # Port to bind to
 BASE_PORT = 9000  # Start allocating ports from here
 MCPO_TIMEOUT = 30  # Timeout for mcpo startup
 IDLE_TIMEOUT = 3600  # Kill idle mcpo after 1 hour
