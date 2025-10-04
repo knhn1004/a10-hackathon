@@ -12,16 +12,17 @@ Provides historical data storage and real-time updates.
 """
 
 import asyncio
+import docker
+import httpx
 import json
 import logging
 import math
+import os
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Deque
 from datetime import datetime
-
-import docker
 from docker.models.containers import Container
 
 # Random Forest detector DISABLED - using PyTorch LSTM only
@@ -236,6 +237,10 @@ class ContainerMonitor:
         self.container_stats_sequences: Dict[str, Deque[Dict]] = (
             {}
         )  # Container ID -> sequence of raw stats
+        
+        # HTTP client for API calls
+        self.http_client = httpx.AsyncClient(timeout=5.0)
+        self.dashboard_url = os.getenv("DASHBOARD_URL", "http://localhost:8080")
 
         # ML mining detector (Random Forest - optional, keeping for compatibility)
         self.ml_detector: Optional["MiningDetectorML"] = None
@@ -976,6 +981,9 @@ class ContainerMonitor:
                 )
 
             self.ml_predictions.append(ml_prediction_record)
+            
+            # Also write to database via API
+            asyncio.create_task(self._save_ml_prediction_to_db(ml_prediction_record))
 
             # Act on high-confidence predictions
             if (
@@ -1486,6 +1494,54 @@ class ContainerMonitor:
         else:
             # Return all active time series
             return [asdict(series) for series in self.ml_time_series.values()]
+    
+    async def _save_ml_prediction_to_db(self, prediction: MLPrediction):
+        """Save ML prediction to database via dashboard API."""
+        try:
+            # Look up container owner
+            logger.info(f"🔍 Looking up owner for container {prediction.container_id[:12]}")
+            response = await self.http_client.get(
+                f"{self.dashboard_url}/api/containers/{prediction.container_id}/owner"
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"❌ Container {prediction.container_id[:12]} owner lookup failed: {response.status_code}")
+                return
+            
+            owner_data = response.json()
+            if not owner_data.get("found"):
+                logger.warning(f"❌ No owner for container {prediction.container_id[:12]}")
+                return
+            
+            user_id = owner_data.get("user_id")
+            logger.info(f"✅ Found owner for {prediction.container_id[:12]}: {user_id}")
+            
+            # Calculate duration from features  
+            duration = prediction.features.get('execution_duration', 0.0)
+            
+            # Write prediction to database (monitor is trusted internal call)
+            save_response = await self.http_client.post(
+                f"{self.dashboard_url}/api/ml/predictions/log",
+                headers={"X-Monitor-Internal": "true"},
+                json={
+                    "container_id": prediction.container_id,
+                    "container_name": prediction.name,
+                    "prediction": prediction.prediction,
+                    "confidence": prediction.confidence,
+                    "samples": prediction.samples,
+                    "duration": duration,
+                    "features": prediction.features,
+                    "user_id_override": user_id,
+                }
+            )
+            
+            if save_response.status_code == 200:
+                logger.info(f"📊 ML prediction saved to DB: {prediction.prediction} ({prediction.confidence:.0%}) for user {user_id}")
+            else:
+                logger.error(f"❌ Failed to save ML prediction: {save_response.status_code} - {save_response.text}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save ML prediction to DB: {e}", exc_info=True)
 
 
 # Global monitor instance

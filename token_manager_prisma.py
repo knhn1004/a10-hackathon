@@ -8,6 +8,7 @@ Handles creation, validation, and revocation of API tokens using Prisma ORM.
 import secrets
 import time
 import hashlib
+import uuid as uuid_module
 from typing import Optional, List
 from datetime import datetime
 
@@ -29,13 +30,16 @@ async def generate_token(user_id: str, username: str, name: str, description: st
     db = await get_prisma()
     
     # Ensure user exists
-    user = await db.user.find_unique(where={'githubId': user_id})
+    user = await db.users.find_unique(where={'githubId': user_id})
     if not user:
         # Create user if doesn't exist
-        user = await db.user.create(
+        user = await db.users.create(
             data={
+                'id': str(uuid_module.uuid4()),
                 'githubId': user_id,
                 'username': username,
+                'createdAt': datetime.utcnow(),
+                'updatedAt': datetime.utcnow(),
             }
         )
     
@@ -44,8 +48,9 @@ async def generate_token(user_id: str, username: str, name: str, description: st
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     
     # Create token record
-    await db.apitoken.create(
+    await db.api_tokens.create(
         data={
+            'id': str(uuid_module.uuid4()),
             'userId': user.id,
             'tokenHash': token_hash,
             'name': name,
@@ -74,16 +79,16 @@ async def validate_token(token: str) -> Optional[dict]:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     
     # Find token with user relationship
-    token_record = await db.apitoken.find_unique(
+    token_record = await db.api_tokens.find_unique(
         where={'tokenHash': token_hash},
-        include={'user': True}
+        include={'users': True}
     )
     
     if not token_record or not token_record.active:
         return None
     
     # Update usage stats
-    await db.apitoken.update(
+    await db.api_tokens.update(
         where={'id': token_record.id},
         data={
             'lastUsedAt': datetime.utcnow(),
@@ -92,7 +97,7 @@ async def validate_token(token: str) -> Optional[dict]:
     )
     
     return {
-        'user_id': token_record.user.username if token_record.user else 'unknown',
+        'user_id': token_record.users.username if token_record.users else 'unknown',
         'name': token_record.name,
         'usage_count': token_record.usageCount + 1,
     }
@@ -110,9 +115,9 @@ async def list_tokens(user_id: str) -> List[dict]:
     db = await get_prisma()
     
     # Find user
-    user = await db.user.find_unique(
+    user = await db.users.find_unique(
         where={'githubId': user_id},
-        include={'apiTokens': True}
+        include={'api_tokens': True}
     )
     
     if not user:
@@ -120,7 +125,7 @@ async def list_tokens(user_id: str) -> List[dict]:
     
     # Convert to dict format
     tokens = []
-    for token in user.apiTokens:
+    for token in user.api_tokens:
         tokens.append({
             'token_hash': token.id,  # Use ID as hash for identification
             'name': token.name,
@@ -150,16 +155,16 @@ async def revoke_token(user_id: str, token_id: str) -> bool:
     db = await get_prisma()
     
     # Find token and verify ownership
-    token = await db.apitoken.find_unique(
+    token = await db.api_tokens.find_unique(
         where={'id': token_id},
-        include={'user': True}
+        include={'users': True}
     )
     
-    if not token or not token.user or token.user.githubId != user_id:
+    if not token or not token.users or token.users.githubId != user_id:
         return False
     
     # Mark as inactive
-    await db.apitoken.update(
+    await db.api_tokens.update(
         where={'id': token_id},
         data={
             'active': False,
@@ -183,16 +188,15 @@ async def delete_token(user_id: str, token_id: str) -> bool:
     db = await get_prisma()
     
     # Find token and verify ownership
-    token = await db.apitoken.find_unique(
+    token = await db.api_tokens.find_unique(
         where={'id': token_id},
-        include={'user': True}
+        include={'users': True}
     )
     
-    if not token or not token.user or token.user.githubId != user_id:
+    if not token or not token.users or token.users.githubId != user_id:
         return False
     
     # Delete permanently
-    await db.apitoken.delete(where={'id': token_id})
+    await db.api_tokens.delete(where={'id': token_id})
     
     return True
-

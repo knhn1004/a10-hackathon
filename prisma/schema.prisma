@@ -1,132 +1,48 @@
-// Prisma Client Python Schema
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = "5"
+  interface            = "asyncio"
+}
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-generator client {
-  provider             = "prisma-client-py"
-  interface            = "asyncio"
-  recursive_type_depth = 5
-}
-
-// Users from GitHub OAuth
-model User {
-  id        String   @id @default(uuid())
-  githubId  String   @unique
-  username  String   @unique
-  email     String?
-  name      String?
-  avatarUrl String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relations
-  apiTokens    ApiToken[]
-  mcpRequests  McpRequest[]
-  llmReviews   LlmReview[]
-  mlPredictions MlPrediction[]
-
-  @@map("users")
-}
-
-// API Tokens for MCP authentication
-model ApiToken {
-  id          String   @id @default(uuid())
+model api_tokens {
+  id          String    @id
   userId      String
-  tokenHash   String   @unique // SHA-256 hash of actual token
+  tokenHash   String    @unique
   name        String
   description String?
-  active      Boolean  @default(true)
-  usageCount  Int      @default(0)
+  active      Boolean   @default(true)
+  usageCount  Int       @default(0)
   lastUsedAt  DateTime?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
   revokedAt   DateTime?
+  users       users     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Relations
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
   @@index([tokenHash])
-  @@map("api_tokens")
-}
-
-// MCP Request History
-model McpRequest {
-  id            String   @id @default(uuid())
-  userId        String?
-  tool          String
-  status        String
-  sandboxId     String?
-  codeLength    Int?
-  url           String?
-  resultPreview String?  @db.Text
-  errorMessage  String?  @db.Text
-  executionTime Float?   // seconds
-  createdAt     DateTime @default(now())
-
-  // Relations
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-
   @@index([userId])
-  @@index([sandboxId])
-  @@index([createdAt])
-  @@map("mcp_requests")
 }
 
-// LLM Code Reviews
-model LlmReview {
-  id              String   @id @default(uuid())
-  userId          String?
-  sandboxId       String
-  source          String   // "execute_python" or "execute_from_url"
-  code            String   @db.Text
-  codeLength      Int
-  decision        String   // "accept" or "reject"
-  confidence      Float
-  threatsDetected String[] // Array of detected threats
-  reasoning       String?  @db.Text
-  reviewTime      Float    // seconds
-  modelUsed       String   // e.g., "llama3.1:latest"
-  createdAt       DateTime @default(now())
-
-  // Relations
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([userId])
-  @@index([sandboxId])
-  @@index([decision])
-  @@index([createdAt])
-  @@map("llm_reviews")
-}
-
-// ML Mining Predictions
-model MlPrediction {
-  id            String   @id @default(uuid())
-  userId        String?
+model container_crashes {
+  id            String   @id
   containerId   String
   containerName String
-  prediction    String   // "normal", "suspicious", "mining"
-  confidence    Float
-  samples       Int
-  duration      Float    // seconds
-  features      Json     // All 19 features as JSON
-  createdAt     DateTime @default(now())
+  exitCode      Int
+  signal        String?
+  oomKilled     Boolean  @default(false)
+  stdout        String?
+  stderr        String?
+  crashedAt     DateTime @default(now())
 
-  // Relations
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([userId])
   @@index([containerId])
-  @@index([prediction])
-  @@index([createdAt])
-  @@map("ml_predictions")
+  @@index([crashedAt])
 }
 
-// Container Metrics (time-series data)
-model ContainerMetric {
-  id              String   @id @default(uuid())
+model container_metrics {
+  id              String   @id
   containerId     String
   containerName   String
   status          String
@@ -142,36 +58,106 @@ model ContainerMetric {
 
   @@index([containerId, createdAt])
   @@index([createdAt])
-  @@map("container_metrics")
 }
 
-// System Metrics (aggregated)
-model SystemMetric {
-  id               String   @id @default(uuid())
-  totalContainers  Int
-  runningContainers Int
-  totalCpuPercent  Float
-  totalMemoryMb    Float
-  createdAt        DateTime @default(now())
-
-  @@index([createdAt])
-  @@map("system_metrics")
-}
-
-// Container Crashes
-model ContainerCrash {
-  id          String   @id @default(uuid())
-  containerId String
+model containers {
+  id            String    @id
+  containerId   String    @unique
   containerName String
-  exitCode    Int
-  signal      String?
-  oomKilled   Boolean  @default(false)
-  stdout      String?  @db.Text
-  stderr      String?  @db.Text
-  crashedAt   DateTime @default(now())
+  userId        String
+  sandboxId     String    @unique
+  createdAt     DateTime  @default(now())
+  deletedAt     DateTime?
+  users         users     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([containerId])
-  @@index([crashedAt])
-  @@map("container_crashes")
+  @@index([sandboxId])
+  @@index([userId])
 }
 
+model llm_reviews {
+  id              String   @id
+  userId          String?
+  sandboxId       String
+  source          String
+  code            String
+  codeLength      Int
+  decision        String
+  confidence      Float
+  threatsDetected String[]
+  reasoning       String?
+  reviewTime      Float
+  modelUsed       String
+  createdAt       DateTime @default(now())
+  users           users?   @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([decision])
+  @@index([sandboxId])
+  @@index([userId])
+}
+
+model mcp_requests {
+  id            String   @id
+  userId        String?
+  tool          String
+  status        String
+  sandboxId     String?
+  codeLength    Int?
+  url           String?
+  resultPreview String?
+  errorMessage  String?
+  executionTime Float?
+  createdAt     DateTime @default(now())
+  users         users?   @relation(fields: [userId], references: [id])
+
+  @@index([createdAt])
+  @@index([sandboxId])
+  @@index([userId])
+}
+
+model ml_predictions {
+  id            String   @id
+  userId        String?
+  containerId   String
+  containerName String
+  prediction    String
+  confidence    Float
+  samples       Int
+  duration      Float
+  features      Json
+  createdAt     DateTime @default(now())
+  users         users?   @relation(fields: [userId], references: [id])
+
+  @@index([containerId])
+  @@index([createdAt])
+  @@index([prediction])
+  @@index([userId])
+}
+
+model system_metrics {
+  id                String   @id
+  totalContainers   Int
+  runningContainers Int
+  totalCpuPercent   Float
+  totalMemoryMb     Float
+  createdAt         DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model users {
+  id             String           @id
+  githubId       String           @unique
+  username       String           @unique
+  email          String?
+  name           String?
+  avatarUrl      String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @default(now())
+  api_tokens     api_tokens[]
+  containers     containers[]
+  llm_reviews    llm_reviews[]
+  mcp_requests   mcp_requests[]
+  ml_predictions ml_predictions[]
+}

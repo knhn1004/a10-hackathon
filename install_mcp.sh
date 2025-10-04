@@ -1,195 +1,207 @@
 #!/bin/bash
-# Universal MCP Server Installation Script
-# Works for any user on Mac/Linux
+# MCP Installation Script
+# Always requires authentication
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+echo "🔧 Code Sandbox MCP Server - Setup"
+echo "==================================="
+echo ""
 
-# Detect the project directory (where this script is located)
+# Get absolute path to this directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_DIR="$SCRIPT_DIR"
+cd "$SCRIPT_DIR"
 
-# Detect OS
-OS="unknown"
+# Get poetry virtualenv path
+VENV_PATH=$(poetry env info -p 2>/dev/null || echo "")
+if [ -z "$VENV_PATH" ]; then
+    echo "⚠️  Poetry virtualenv not found. Running poetry install..."
+    poetry install
+    VENV_PATH=$(poetry env info -p)
+fi
+
+PYTHON_PATH="$VENV_PATH/bin/python"
+echo "✅ Python: $PYTHON_PATH"
+echo "✅ Project: $SCRIPT_DIR"
+echo ""
+
+# Claude Desktop config location
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="mac"
     CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    OS="linux"
     CLAUDE_CONFIG="$HOME/.config/Claude/claude_desktop_config.json"
 else
-    echo -e "${RED}❌ Unsupported OS: $OSTYPE${NC}"
-    echo "This script supports Mac and Linux only."
+    echo "❌ Unsupported OS: $OSTYPE"
     exit 1
 fi
 
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  Code Sandbox MCP Server - Installation${NC}"
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo
-echo -e "${GREEN}✓${NC} Detected OS: $OS"
-echo -e "${GREEN}✓${NC} Project directory: $PROJECT_DIR"
-echo
+# =============================================================================
+# Configuration Prompts
+# =============================================================================
 
-# Check prerequisites
-echo -e "${BLUE}Checking prerequisites...${NC}"
-echo
+echo "🔐 Authentication Configuration"
+echo "================================"
+echo ""
+echo "This MCP server requires authentication."
+echo ""
+echo "📋 You need:"
+echo "  1. A running dashboard (local or deployed)"
+echo "  2. An API token (generate from dashboard after login)"
+echo ""
 
-# Check Poetry
-if ! command -v poetry &> /dev/null; then
-    echo -e "${RED}❌ Poetry not found${NC}"
-    echo "Install it with: pip install poetry"
-    echo "Or visit: https://python-poetry.org/docs/#installation"
+read -p "Dashboard URL [http://localhost:8080]: " INPUT_URL
+DASHBOARD_URL=${INPUT_URL:-http://localhost:8080}
+
+echo ""
+echo "📝 Generate your API token:"
+echo "  1. Visit: $DASHBOARD_URL"
+echo "  2. Login with GitHub"
+echo "  3. Go to 'API Tokens' tab"
+echo "  4. Click 'Generate New Token'"
+echo "  5. Copy the token (starts with 'mcp_')"
+echo ""
+
+read -p "Enter your API token: " MCP_API_TOKEN
+
+if [[ -z "$MCP_API_TOKEN" ]]; then
+    echo "❌ Token is required for MCP server"
     exit 1
+elif [[ ! "$MCP_API_TOKEN" =~ ^mcp_ ]]; then
+    echo "⚠️  Warning: Token should start with 'mcp_'"
 fi
-# Get absolute path to poetry and resolve any symlinks/relative paths
-POETRY_PATH="$(command -v poetry)"
-# Resolve to real path (remove .. and symlinks)
-POETRY_PATH="$(cd "$(dirname "$POETRY_PATH")" && pwd)/$(basename "$POETRY_PATH")"
-echo -e "${GREEN}✓${NC} Poetry installed at: $POETRY_PATH"
 
-# Check Docker
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}❌ Docker not found${NC}"
-    echo "Install Docker Desktop from: https://www.docker.com/products/docker-desktop"
-    exit 1
+echo ""
+echo "📦 Sandbox Configuration"
+echo "========================"
+echo ""
+
+read -p "Docker image [code-sandbox:latest]: " INPUT_IMAGE
+SANDBOX_IMAGE=${INPUT_IMAGE:-code-sandbox:latest}
+
+read -p "Idle timeout (seconds) [300]: " INPUT_TIMEOUT
+SANDBOX_TIMEOUT=${INPUT_TIMEOUT:-300}
+
+read -p "Max concurrent sandboxes [10]: " INPUT_MAX
+MAX_SANDBOXES=${INPUT_MAX:-10}
+
+echo ""
+echo "📋 Configuration Summary:"
+echo "========================="
+echo "  Dashboard URL: $DASHBOARD_URL"
+echo "  API Token: ${MCP_API_TOKEN:0:15}...${MCP_API_TOKEN: -5}"
+echo "  Docker Image: $SANDBOX_IMAGE"
+echo "  Timeout: ${SANDBOX_TIMEOUT}s"
+echo "  Max Sandboxes: $MAX_SANDBOXES"
+echo ""
+
+read -p "Install with this configuration? (Y/n): " -n 1 -r
+echo ""
+if [[ $REPLY =~ ^[Nn]$ ]]; then
+    echo "❌ Installation cancelled"
+    exit 0
 fi
-echo -e "${GREEN}✓${NC} Docker installed"
 
-# Check if Docker is running
-if ! docker info &> /dev/null; then
-    echo -e "${YELLOW}⚠️  Docker daemon not running${NC}"
-    echo "Please start Docker Desktop and try again"
-    exit 1
-fi
-echo -e "${GREEN}✓${NC} Docker is running"
+# =============================================================================
+# Create Claude Desktop Config
+# =============================================================================
 
-echo
+echo ""
+echo "📝 Installing to Claude Desktop..."
+echo ""
 
-# Install Python dependencies
-echo -e "${BLUE}Installing Python dependencies...${NC}"
-cd "$PROJECT_DIR"
-poetry install --no-root 2>&1 | grep -v "^$" | tail -3 || true
-echo -e "${GREEN}✓${NC} Dependencies installed"
-echo
+# Create config directory
+mkdir -p "$(dirname "$CLAUDE_CONFIG")"
 
-# Check if Docker image exists, build if not
-echo -e "${BLUE}Checking Docker image...${NC}"
-if ! docker images | grep -q "code-sandbox"; then
-    echo "Building Docker image (this may take a few minutes)..."
-    docker build -t code-sandbox:latest "$PROJECT_DIR" 2>&1 | tail -5
-    echo -e "${GREEN}✓${NC} Docker image built"
-else
-    echo -e "${GREEN}✓${NC} Docker image exists"
-fi
-echo
-
-# Generate Claude Desktop config
-echo -e "${BLUE}Generating Claude Desktop configuration...${NC}"
-
-# Create config directory if it doesn't exist
-CLAUDE_CONFIG_DIR="$(dirname "$CLAUDE_CONFIG")"
-mkdir -p "$CLAUDE_CONFIG_DIR"
-
-# Create backup if config exists
+# Backup existing config
 if [ -f "$CLAUDE_CONFIG" ]; then
     BACKUP="$CLAUDE_CONFIG.backup.$(date +%Y%m%d_%H%M%S)"
-    echo -e "${YELLOW}Creating backup...${NC}"
     cp "$CLAUDE_CONFIG" "$BACKUP"
-    echo -e "${GREEN}✓${NC} Backup saved to:"
-    echo "  $BACKUP"
-    echo
+    echo "✅ Backed up existing config to:"
+    echo "   $BACKUP"
+    echo ""
 fi
 
-# Generate the config with absolute poetry path and relative script path
+# Generate config with authentication (always required)
 cat > "$CLAUDE_CONFIG" << EOF
 {
   "mcpServers": {
     "code-sandbox": {
-      "command": "$POETRY_PATH",
-      "args": [
-        "-C",
-        "$PROJECT_DIR",
-        "run",
-        "python",
-        "$PROJECT_DIR/mcp_server.py"
-      ],
-      "cwd": "$PROJECT_DIR",
+      "command": "$PYTHON_PATH",
+      "args": ["$SCRIPT_DIR/mcp_server.py"],
       "env": {
-        "SANDBOX_IMAGE": "code-sandbox:latest",
-        "SANDBOX_TIMEOUT": "300",
-        "MAX_SANDBOXES": "10"
+        "MCP_API_TOKEN": "$MCP_API_TOKEN",
+        "REQUIRE_TOKEN": "true",
+        "DASHBOARD_URL": "$DASHBOARD_URL",
+        "SANDBOX_IMAGE": "$SANDBOX_IMAGE",
+        "SANDBOX_TIMEOUT": "$SANDBOX_TIMEOUT",
+        "MAX_SANDBOXES": "$MAX_SANDBOXES"
       }
     }
   }
 }
 EOF
 
-echo -e "${GREEN}✓${NC} Configuration written to:"
-echo "  $CLAUDE_CONFIG"
-echo
-echo "  Using:"
-echo "  • Poetry: $POETRY_PATH"
-echo "  • Project: $PROJECT_DIR"
-echo
+echo "✅ Config written to:"
+echo "   $CLAUDE_CONFIG"
+echo ""
 
+# =============================================================================
 # Restart Claude Desktop
-echo -e "${BLUE}Restarting Claude Desktop...${NC}"
-echo
+# =============================================================================
 
-if [[ "$OS" == "mac" ]]; then
-    # Check if Claude is running
-    if pgrep -x "Claude" > /dev/null; then
-        echo "Quitting Claude Desktop..."
-        osascript -e 'quit app "Claude"' 2>/dev/null || true
-        sleep 2
-        echo -e "${GREEN}✓${NC} Claude quit"
+echo "🔄 Restarting Claude Desktop..."
+echo ""
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    pkill -x "Claude" 2>/dev/null && echo "   ✅ Closed Claude Desktop" || echo "   ℹ️  Claude Desktop not running"
+    sleep 2
+    open -a "Claude" 2>/dev/null && echo "   ✅ Restarted Claude Desktop" || echo "   ⚠️  Could not auto-restart Claude - please open manually"
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    # Linux
+    pkill -i claude 2>/dev/null && echo "   ✅ Closed Claude Desktop" || echo "   ℹ️  Claude Desktop not running"
+    sleep 2
+    # Try common Linux launch methods
+    if command -v claude &> /dev/null; then
+        claude &> /dev/null &
+        echo "   ✅ Restarted Claude Desktop"
+    else
+        echo "   ⚠️  Could not auto-restart Claude - please open manually"
     fi
-    
-    echo "Starting Claude Desktop..."
-    open -a Claude 2>/dev/null && {
-        echo -e "${GREEN}✓${NC} Claude Desktop started"
-    } || {
-        echo -e "${YELLOW}⚠️  Could not auto-start Claude Desktop${NC}"
-        echo "Please open Claude Desktop manually"
-    }
-elif [[ "$OS" == "linux" ]]; then
-    echo -e "${YELLOW}Please restart Claude Desktop manually${NC}"
+else
+    echo "   ⚠️  Auto-restart not supported on this OS - please restart Claude manually"
 fi
 
-echo
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  ✅ Installation Complete!${NC}"
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo
-echo -e "${BLUE}Next steps:${NC}"
-echo "  1. Wait for Claude Desktop to fully start (5-10 seconds)"
-echo "  2. Look for the 🔌 icon in the bottom right corner"
-echo "  3. Click it to verify 'code-sandbox' is connected"
-echo "  4. Test with: ${GREEN}'Create a sandbox'${NC}"
-echo
-echo -e "${BLUE}Expected response:${NC}"
-echo "  ✅ Sandbox created successfully!"
-echo "  Sandbox ID: abc12345"
-echo "  Status: ready"
-echo
-echo -e "${BLUE}View logs:${NC}"
-if [[ "$OS" == "mac" ]]; then
-    echo "  tail -f ~/Library/Logs/Claude/mcp*.log"
-elif [[ "$OS" == "linux" ]]; then
-    echo "  tail -f ~/.config/Claude/logs/mcp*.log"
-fi
-echo
-echo -e "${BLUE}Configuration file:${NC}"
-echo "  $CLAUDE_CONFIG"
-echo
-echo -e "${BLUE}Project directory:${NC}"
-echo "  $PROJECT_DIR"
-echo
+echo ""
 
+# =============================================================================
+# Completion
+# =============================================================================
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Installation Complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "🔍 Verify MCP Connection:"
+echo "   - Look for 🔌 icon in bottom-right of Claude"
+echo "   - Should show 'code-sandbox' connected"
+echo ""
+echo "🧪 Test it:"
+echo "   Ask Claude: 'Create a sandbox and calculate fibonacci(10)'"
+echo ""
+echo "🔑 Authentication:"
+echo "   • Your requests are tracked in the dashboard"
+echo "   • View usage in 'API Tokens' tab at $DASHBOARD_URL"
+echo "   • Token: ${MCP_API_TOKEN:0:15}...${MCP_API_TOKEN: -5}"
+echo ""
+echo "💡 To update your token:"
+echo "   Edit: $CLAUDE_CONFIG"
+echo "   Change MCP_API_TOKEN value"
+echo "   Restart Claude Desktop"
+echo ""
+echo "📚 Documentation:"
+echo "   • README.md - Project overview"
+echo "   • MCP_README.md - MCP server details"
+echo ""
+echo "🎉 Happy coding!"
+echo ""

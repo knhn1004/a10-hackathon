@@ -13,7 +13,8 @@ import asyncio
 import logging
 import subprocess
 import time
-from typing import Optional
+import uuid as uuid_module
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -171,12 +172,12 @@ app.add_middleware(
 # Configure OAuth
 oauth = OAuth()
 
-# GitHub OAuth configuration
+# GitHub OAuth configuration (always required)
 GITHUB_CLIENT_ID = os.environ.get("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET")
-ENABLE_AUTH = os.environ.get("ENABLE_AUTH", "false").lower() == "true"
+ENABLE_AUTH = True  # Always enabled
 
-if ENABLE_AUTH and GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
+if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
     oauth.register(
         name='github',
         client_id=GITHUB_CLIENT_ID,
@@ -190,18 +191,12 @@ if ENABLE_AUTH and GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
     )
     logger.info("🔐 GitHub OAuth enabled")
 else:
-    if ENABLE_AUTH:
-        logger.warning("⚠️  AUTH enabled but GitHub credentials missing - auth will not work!")
-    else:
-        logger.info("🔓 Authentication disabled (set ENABLE_AUTH=true to enable)")
+    logger.warning("⚠️  GitHub credentials missing - authentication will not work! Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET")
 
 
 # Authentication dependency
 async def get_current_user(request: Request):
     """Get current authenticated user from session."""
-    if not ENABLE_AUTH:
-        # Auth disabled - allow all requests
-        return {"login": "development-user", "email": "dev@localhost"}
     
     user = request.session.get('user')
     if not user:
@@ -214,8 +209,6 @@ async def get_current_user(request: Request):
 
 
 # Public routes (no auth required)
-# When ENABLE_AUTH is true, only protect token management endpoints
-# All monitoring/observability endpoints remain public
 PUBLIC_ROUTES = [
     "/", 
     "/auth/github", 
@@ -226,42 +219,49 @@ PUBLIC_ROUTES = [
     "/api/overview",
     "/api/system",
     "/api/containers",
-    "/api/requests/history",
-    "/api/ml/",
-    "/api/llm/",
     "/api/crashes",
     "/api/alerts",
+]
+
+# User-specific routes (require authentication when ENABLE_AUTH=true)
+# These endpoints filter data by user automatically
+USER_ROUTES = [
+    "/api/requests/history",
+    "/api/ml/predictions",
+    "/api/llm/reviews",
+    "/api/tokens",
 ]
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require authentication only for token management endpoints.
+    """Require authentication for user-specific and token management endpoints.
     
-    Monitoring and observability endpoints are public.
-    Only token generation/management requires authentication.
+    Public: System monitoring, container stats, health checks
+    Protected: User's MCP requests, LLM reviews, ML predictions, tokens
     """
-    # Skip auth if disabled
-    if not ENABLE_AUTH:
-        return await call_next(request)
-    
     # Check if route is public
     for public_route in PUBLIC_ROUTES:
         if request.url.path.startswith(public_route):
             return await call_next(request)
     
-    # Only protect /api/tokens/* endpoints (require auth to manage tokens)
-    if request.url.path.startswith("/api/tokens"):
+    # Check if route requires user auth
+    requires_auth = False
+    for user_route in USER_ROUTES:
+        if request.url.path.startswith(user_route):
+            requires_auth = True
+            break
+    
+    if requires_auth:
         try:
             user_in_session = 'user' in request.session
         except (AssertionError, RuntimeError):
             user_in_session = False
         
         if not user_in_session:
-            from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Not authenticated. Please login to manage API tokens."}
+                content={"detail": "Not authenticated. Please login to view your data."}
             )
     
     return await call_next(request)
@@ -278,9 +278,6 @@ async def login_redirect():
 @app.get("/auth/github")
 async def auth_github(request: Request):
     """Initiate GitHub OAuth flow."""
-    if not ENABLE_AUTH:
-        return RedirectResponse(url="/")
-    
     redirect_uri = request.url_for('auth_callback')
     return await oauth.github.authorize_redirect(request, redirect_uri)
 
@@ -293,9 +290,6 @@ async def auth_callback(request: Request):
     - For local dev: http://localhost:8080/auth/callback
     - For production: https://your-app.fly.dev/auth/callback
     """
-    if not ENABLE_AUTH:
-        return RedirectResponse(url="/")
-    
     try:
         token = await oauth.github.authorize_access_token(request)
         resp = await oauth.github.get('user', token=token)
@@ -333,13 +327,6 @@ async def get_current_user_info(request: Request):
     
     Returns user info from session or 401 if not authenticated.
     """
-    if not ENABLE_AUTH:
-        return {
-            "authenticated": False,
-            "auth_enabled": False,
-            "user": None
-        }
-    
     user = request.session.get('user')
     if user:
         return {
@@ -347,8 +334,12 @@ async def get_current_user_info(request: Request):
             "auth_enabled": True,
             "user": user
         }
-    else:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    return {
+        "authenticated": False,
+        "auth_enabled": True,
+        "user": None
+    }
 
 
 # =============================================================================
@@ -467,6 +458,66 @@ async def validate_token_endpoint(token: str):
             "valid": False,
             "error": "Invalid or revoked token"
         }
+
+
+class McpRequestLog(BaseModel):
+    tool: str
+    status: str
+    sandbox_id: Optional[str] = None
+    code_length: Optional[int] = None
+    url: Optional[str] = None
+    result_preview: Optional[str] = None
+    execution_time: Optional[float] = None
+
+@app.post("/api/requests/log")
+async def log_mcp_request(
+    request: Request,
+    log_data: McpRequestLog,
+):
+    """Log an MCP request to database.
+    
+    PUBLIC endpoint - uses X-API-Token header for authentication.
+    """
+    # Get token from header
+    api_token = request.headers.get("X-API-Token")
+    if not api_token:
+        raise HTTPException(status_code=401, detail="API token required")
+    
+    # Validate token
+    token_data = await token_manager.validate_token(api_token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    try:
+        db = await get_prisma()
+        
+        # Get user from token
+        user_record = await db.users.find_first(
+            where={'username': token_data['user_id']}
+        )
+        
+        if not user_record:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Create MCP request record
+        await db.mcp_requests.create(
+            data={
+                'id': str(uuid_module.uuid4()),
+                'userId': user_record.id,
+                'tool': log_data.tool,
+                'status': log_data.status,
+                'sandboxId': log_data.sandbox_id,
+                'codeLength': log_data.code_length,
+                'url': log_data.url,
+                'resultPreview': log_data.result_preview,
+                'executionTime': log_data.execution_time,
+            }
+        )
+        
+        return {"success": True, "message": "Request logged"}
+    except Exception as e:
+        logger.error(f"Failed to log MCP request: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # No middleware - we'll read MCP requests from file instead
@@ -804,26 +855,49 @@ async def kill_container(container_id: str):
 
 
 @app.get("/api/requests/history")
-async def get_mcp_request_history(limit: int = 50):
+async def get_mcp_request_history(
+    request: Request,
+    limit: int = 50,
+    user: dict = Depends(get_current_user)
+):
     """
-    Get MCP function call history from MCP server.
+    Get MCP function call history for the authenticated user.
 
     Args:
         limit: Number of recent requests to return (default: 50)
+        user: Current authenticated user
     """
-    # Use absolute path relative to this server file to avoid CWD issues
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    history_file = os.path.join(base_dir, "mcp_requests.json")
-
     try:
-        if os.path.exists(history_file):
-            with open(history_file, "r") as f:
-                requests = json.load(f)
-                # Get last N requests in reverse order (newest first)
-                recent = list(reversed(requests[-limit:]))
-                return {"requests": recent, "count": len(recent)}
-        else:
+        db = await get_prisma()
+        github_id = str(user.get("id", user.get("login")))
+        
+        # Get user's requests only
+        user_record = await db.users.find_unique(where={'githubId': github_id})
+        if not user_record:
             return {"requests": [], "count": 0}
+        
+        requests = await db.mcp_requests.find_many(
+            where={'userId': user_record.id},
+            order={'createdAt': 'desc'},
+            take=limit
+        )
+        
+        # Convert to dict
+        request_list = [{
+            'timestamp': req.createdAt.timestamp(),
+            'tool': req.tool,
+            'status': req.status,
+            'sandbox_id': req.sandboxId,
+            'arguments': {
+                'code_length': req.codeLength,
+                'url': req.url,
+            } if req.codeLength or req.url else {},
+            'result_preview': req.resultPreview,
+            'error_message': req.errorMessage,
+            'execution_time': req.executionTime,
+        } for req in requests]
+        
+        return {"requests": request_list, "count": len(request_list)}
     except Exception as e:
         logger.error(f"Error reading MCP request history: {e}")
         return {"requests": [], "count": 0}
@@ -890,22 +964,279 @@ async def get_ml_model_info():
 
 
 @app.get("/api/llm/reviews")
-async def get_llm_reviews(limit: int = 20):
-    """Return recent LLM code reviews from file."""
+async def get_llm_reviews(
+    request: Request,
+    limit: int = 20,
+    user: dict = Depends(get_current_user)
+):
+    """Return recent LLM code reviews for the authenticated user."""
     try:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        reviews_file = os.path.join(base_dir, "llm_reviews.json")
-
-        if os.path.exists(reviews_file):
-            with open(reviews_file, "r") as f:
-                reviews = json.load(f)
-                recent = list(reversed(reviews[-limit:]))
-                return {"reviews": recent, "count": len(recent)}
-        else:
+        db = await get_prisma()
+        github_id = str(user.get("id", user.get("login")))
+        
+        # Get user's reviews only
+        user_record = await db.users.find_unique(where={'githubId': github_id})
+        if not user_record:
             return {"reviews": [], "count": 0}
+        
+        reviews = await db.llm_reviews.find_many(
+            where={'userId': user_record.id},
+            order={'createdAt': 'desc'},
+            take=limit
+        )
+        
+        # Convert to dict
+        review_list = [{
+            'timestamp': review.createdAt.timestamp(),
+            'sandbox_id': review.sandboxId,
+            'source': review.source,
+            'code_length': review.codeLength,
+            'review': {
+                'decision': review.decision,
+                'confidence': review.confidence,
+                'threats_detected': review.threatsDetected,
+                'reasoning': review.reasoning,
+            },
+            'review_time': review.reviewTime,
+            'model_used': review.modelUsed,
+        } for review in reviews]
+        
+        return {"reviews": review_list, "count": len(review_list)}
     except Exception as e:
         logger.error(f"Error reading LLM reviews: {e}")
         return {"reviews": [], "count": 0}
+
+
+class LlmReviewLog(BaseModel):
+    sandbox_id: str
+    code: str
+    code_length: int
+    source: str
+    decision: str
+    confidence: float
+    threats_detected: list[str]
+    reasoning: Optional[str] = None
+    review_time: float
+    model_used: str
+
+class ContainerRegister(BaseModel):
+    container_id: str
+    container_name: str
+    sandbox_id: str
+
+@app.post("/api/containers/register")
+async def register_container(
+    request: Request,
+    container_reg: ContainerRegister,
+):
+    """Register a container with its owner.
+    
+    PUBLIC endpoint - uses X-API-Token header for authentication.
+    """
+    # Get token from header
+    api_token = request.headers.get("X-API-Token")
+    if not api_token:
+        raise HTTPException(status_code=401, detail="API token required")
+    
+    # Validate token
+    token_data = await token_manager.validate_token(api_token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    try:
+        db = await get_prisma()
+        
+        # Get user from token
+        user_record = await db.users.find_first(
+            where={'username': token_data['user_id']}
+        )
+        
+        if not user_record:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Register container
+        await db.containers.create(
+            data={
+                'id': str(uuid_module.uuid4()),
+                'containerId': container_reg.container_id,
+                'containerName': container_reg.container_name,
+                'sandboxId': container_reg.sandbox_id,
+                'userId': user_record.id,
+            }
+        )
+        
+        logger.info(f"📦 Registered container {container_reg.container_id} for user {token_data['user_id']}")
+        return {"success": True, "message": "Container registered"}
+    except Exception as e:
+        logger.error(f"Failed to register container: {e}")
+        # Don't fail - just log warning
+        return {"success": False, "message": str(e)}
+
+
+@app.get("/api/containers/{container_id}/owner")
+async def get_container_owner(container_id: str):
+    """Get the owner of a container (used by monitor).
+    
+    PUBLIC endpoint - monitor uses this to link ML predictions.
+    """
+    try:
+        logger.info(f"🔍 Looking up owner for container: {container_id}")
+        db = await get_prisma()
+        
+        container = await db.containers.find_unique(
+            where={'containerId': container_id},
+            include={'users': True}
+        )
+        
+        logger.info(f"   Query result: {container}")
+        
+        if not container:
+            logger.warning(f"   ❌ Container {container_id} not found in database")
+            return {"found": False}
+        
+        logger.info(f"   ✅ Found owner: {container.users.username} ({container.users.id})")
+        
+        return {
+            "found": True,
+            "user_id": container.users.id,
+            "username": container.users.username,
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get container owner: {e}", exc_info=True)
+        return {"found": False}
+
+
+class MlPredictionLog(BaseModel):
+    container_id: str
+    container_name: str
+    prediction: str  # "normal", "suspicious", "mining"
+    confidence: float
+    samples: int
+    duration: float
+    features: dict  # All features as JSON
+
+class MlPredictionLogExtended(MlPredictionLog):
+    user_id_override: Optional[str] = None  # For monitor internal calls
+
+@app.post("/api/ml/predictions/log")
+async def log_ml_prediction_endpoint(
+    request: Request,
+    pred_log: MlPredictionLogExtended,
+):
+    """Log an ML prediction to database.
+    
+    PUBLIC endpoint - uses X-API-Token or X-Monitor-Internal header.
+    """
+    user_id = None
+    
+    # Check for monitor internal call
+    if request.headers.get("X-Monitor-Internal") == "true":
+        # Monitor provides user_id directly
+        user_id = pred_log.user_id_override
+        if not user_id:
+            logger.warning("Monitor call without user_id_override")
+            return {"success": False, "message": "User ID required"}
+    else:
+        # Regular API token auth
+        api_token = request.headers.get("X-API-Token")
+        if not api_token:
+            return {"success": False, "message": "Authentication required"}
+        
+        # Validate token
+        token_data = await token_manager.validate_token(api_token)
+        if not token_data:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Get user from token
+        db = await get_prisma()
+        user_record = await db.users.find_first(
+            where={'username': token_data['user_id']}
+        )
+        
+        if not user_record:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_id = user_record.id
+    
+    try:
+        db = await get_prisma()
+        
+        # Create ML prediction record (userId optional for now)
+        pred_data = {
+            'id': str(uuid_module.uuid4()),
+            'containerId': pred_log.container_id,
+            'containerName': pred_log.container_name,
+            'prediction': pred_log.prediction,
+            'confidence': pred_log.confidence,
+            'samples': pred_log.samples,
+            'duration': pred_log.duration,
+            'features': json.dumps(pred_log.features),  # Json field needs string
+        }
+        
+        # Add userId if available
+        if user_id:
+            pred_data['userId'] = user_id
+        
+        await db.ml_predictions.create(data=pred_data)
+        
+        logger.debug(f"📊 ML prediction saved to database: {pred_log.prediction} ({pred_log.confidence:.2%})")
+        return {"success": True, "message": "Prediction logged"}
+    except Exception as e:
+        logger.error(f"Failed to log ML prediction: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/api/llm/reviews/log")
+async def log_llm_review_endpoint(
+    request: Request,
+    review_log: LlmReviewLog,
+):
+    """Log an LLM code review to database.
+    
+    PUBLIC endpoint - uses X-API-Token header for authentication.
+    """
+    # Get token from header
+    api_token = request.headers.get("X-API-Token")
+    if not api_token:
+        raise HTTPException(status_code=401, detail="API token required")
+    
+    # Validate token
+    token_data = await token_manager.validate_token(api_token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    try:
+        db = await get_prisma()
+        
+        # Get user from token
+        user_record = await db.users.find_first(
+            where={'username': token_data['user_id']}
+        )
+        
+        if not user_record:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Create LLM review record
+        await db.llm_reviews.create(
+            data={
+                'id': str(uuid_module.uuid4()),
+                'userId': user_record.id,
+                'sandboxId': review_log.sandbox_id,
+                'code': review_log.code,
+                'codeLength': review_log.code_length,
+                'source': review_log.source,
+                'decision': review_log.decision,
+                'confidence': review_log.confidence,
+                'threatsDetected': review_log.threats_detected,
+                'reasoning': review_log.reasoning,
+                'reviewTime': review_log.review_time,
+                'modelUsed': review_log.model_used,
+            }
+        )
+        
+        return {"success": True, "message": "Review logged"}
+    except Exception as e:
+        logger.error(f"Failed to log LLM review: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/ml/classifications")
@@ -929,14 +1260,39 @@ async def get_ml_classifications(limit: int = 50):
 
 
 @app.get("/api/ml/predictions")
-async def get_ml_predictions(limit: int = 100):
-    """Return ALL recent ML predictions (not just alerts above threshold)."""
-    if not monitor:
-        raise HTTPException(status_code=503, detail="Monitor not initialized")
-
+async def get_ml_predictions(
+    request: Request,
+    limit: int = 100,
+    user: dict = Depends(get_current_user)
+):
+    """Return ALL recent ML predictions for the authenticated user."""
     try:
-        predictions = monitor.get_ml_predictions(limit=limit)
-        return {"predictions": predictions, "count": len(predictions)}
+        db = await get_prisma()
+        github_id = str(user.get("id", user.get("login")))
+        
+        # Get user's predictions only
+        user_record = await db.users.find_unique(where={'githubId': github_id})
+        if not user_record:
+            return {"predictions": [], "count": 0}
+        
+        predictions = await db.ml_predictions.find_many(
+            where={'userId': user_record.id},
+            order={'createdAt': 'desc'},
+            take=limit
+        )
+        
+        # Convert to dict
+        pred_list = [{
+            'timestamp': pred.createdAt.timestamp(),
+            'container_id': pred.containerId,
+            'name': pred.containerName,
+            'prediction': pred.prediction,
+            'confidence': pred.confidence,
+            'samples': pred.samples,
+            'features': pred.features,
+        } for pred in predictions]
+        
+        return {"predictions": pred_list, "count": len(pred_list)}
     except Exception as e:
         logger.error(f"Error reading ML predictions: {e}")
         return {"predictions": [], "count": 0}

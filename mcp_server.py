@@ -73,7 +73,7 @@ CHECK_INTERVAL = 60
 # API Token configuration (per-user, from local environment)
 MCP_API_TOKEN = os.getenv("MCP_API_TOKEN")  # User's personal token
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8080")
-REQUIRE_TOKEN = os.getenv("REQUIRE_TOKEN", "false").lower() == "true"
+REQUIRE_TOKEN = True  # Always required
 
 # Note: MCP_API_TOKEN is set by each user locally, not on the server!
 # Users generate tokens from the dashboard and configure them locally.
@@ -164,94 +164,89 @@ def load_existing_history():
 load_existing_history()
 
 
-def log_request(tool_name: str, arguments: Dict, result: str, status: str = "success"):
-    """Log MCP request to history (both in-memory and file)."""
-    import json
-    from datetime import datetime
-
-    request_entry = {
-        "timestamp": time.time(),
-        "datetime": datetime.now().isoformat(),  # Human-readable timestamp
-        "tool": tool_name,
-        "arguments": arguments,
-        "status": status,
-        "result_preview": result[:200] if len(result) > 200 else result,
-        "session_id": current_session_id,
-    }
-
-    # Keep only last MAX_HISTORY_SIZE requests in memory
-    request_history.append(request_entry)
-    if len(request_history) > MAX_HISTORY_SIZE:
-        request_history.pop(0)
-
-    # Also save to file for cross-process access
-    try:
-        # Get absolute path to ensure we know where we're writing
-        history_path = os.path.abspath(HISTORY_FILE)
-        logger.info(f"📝 Logging {tool_name} ({status}) to {history_path}")
-
-        with open(history_path, "w") as f:
-            json.dump(request_history, f, indent=2)
-
-        logger.info(f"✅ Logged successfully - total history: {len(request_history)}")
-    except PermissionError as e:
-        logger.error(f"❌ Permission denied writing to {history_path}: {e}")
-        logger.error(
-            f"   Check file permissions or use a different HISTORY_FILE location"
-        )
-    except Exception as e:
-        logger.error(f"❌ Failed to save request history to file: {e}")
-        logger.error(f"   File path: {os.path.abspath(HISTORY_FILE)}")
-        logger.error(f"   Current directory: {os.getcwd()}")
+def log_request(tool_name: str, arguments: Dict, result: str, status: str = "success", execution_time: float = None):
+    """Log MCP request to database via dashboard API (fire and forget)."""
+    # Only log if token auth is enabled
+    if not REQUIRE_TOKEN or not MCP_API_TOKEN:
+        return
+    
+    # Fire and forget - don't block on logging
+    async def _log():
+        try:
+            response = await http_client.post(
+                f"{DASHBOARD_URL}/api/requests/log",
+                headers={"X-API-Token": MCP_API_TOKEN},
+                json={
+                    "tool": tool_name,
+                    "status": status,
+                    "sandbox_id": arguments.get("sandbox_id"),
+                    "code_length": arguments.get("code_length"),
+                    "url": arguments.get("url"),
+                    "result_preview": result[:500] if result else "",
+                    "execution_time": execution_time,
+                },
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                logger.debug(f"📝 Logged {tool_name} to database")
+        except Exception as e:
+            logger.debug(f"Failed to log request: {e}")
+    
+    # Schedule the async task without blocking
+    asyncio.create_task(_log())
 
 
 def log_llm_review(
     sandbox_id: str,
-    code_length: int,
+    code: str,
     review: Any,
     source: str = "execute_code",
+    review_time: float = 0.0,
+    model_used: str = "unknown",
 ):
-    """Persist LLM code review details for dashboard visualization."""
-    import json
-    from datetime import datetime
-
-    try:
-        # Normalize review to dict (handle both objects and dicts)
-        if isinstance(review, dict):
-            review_dict = {
-                "decision": review.get("decision", None),
-                "confidence": review.get("confidence", None),
-                "reasons": review.get("reasons", None),
-                "threats_detected": review.get("threats_detected", None),
-                "safe_alternative": review.get("safe_alternative", None),
-            }
-        else:
-            review_dict = {
-                "decision": getattr(review, "decision", None),
-                "confidence": getattr(review, "confidence", None),
-                "reasons": getattr(review, "reasons", None),
-                "threats_detected": getattr(review, "threats_detected", None),
-                "safe_alternative": getattr(review, "safe_alternative", None),
-            }
-
-        entry = {
-            "timestamp": time.time(),
-            "datetime": datetime.now().isoformat(),
-            "sandbox_id": sandbox_id,
-            "code_length": code_length,
-            "session_id": current_session_id,
-            "source": source,
-            "review": review_dict,
-        }
-
-        llm_review_history.append(entry)
-        if len(llm_review_history) > MAX_HISTORY_SIZE:
-            llm_review_history.pop(0)
-
-        with open(LLM_REVIEW_FILE, "w") as f:
-            json.dump(llm_review_history, f, indent=2)
-    except Exception as e:
-        logger.debug(f"Failed to log LLM review: {e}")
+    """Persist LLM code review details to database (fire and forget)."""
+    if not REQUIRE_TOKEN or not MCP_API_TOKEN:
+        return
+    
+    # Fire and forget - don't block
+    async def _log():
+        try:
+            # Normalize review to dict
+            if isinstance(review, dict):
+                decision = review.get("decision", "unknown")
+                confidence = review.get("confidence", 0.0)
+                threats = review.get("threats_detected", [])
+                reasoning = review.get("reasons", "")
+            else:
+                decision = getattr(review, "decision", "unknown")
+                confidence = getattr(review, "confidence", 0.0)
+                threats = getattr(review, "threats_detected", [])
+                reasoning = getattr(review, "reasons", "")
+            
+            # Send to dashboard API
+            await http_client.post(
+                f"{DASHBOARD_URL}/api/llm/reviews/log",
+                headers={"X-API-Token": MCP_API_TOKEN},
+                json={
+                    "sandbox_id": sandbox_id,
+                    "code": code,
+                    "code_length": len(code),
+                    "source": source,
+                    "decision": decision,
+                    "confidence": confidence,
+                    "threats_detected": threats if isinstance(threats, list) else [],
+                    "reasoning": str(reasoning) if reasoning else None,
+                    "review_time": review_time,
+                    "model_used": model_used,
+                },
+                timeout=5.0
+            )
+            logger.debug(f"📝 Logged LLM review to database")
+        except Exception as e:
+            logger.debug(f"Failed to log LLM review: {e}")
+    
+    # Schedule the async task
+    asyncio.create_task(_log())
 
 
 def get_request_history(limit: int = 50) -> list:
@@ -458,7 +453,12 @@ class SandboxManager:
 
                     # Persist LLM review
                     log_llm_review(
-                        sandbox_id, len(code), review_result, source="execute_code"
+                        sandbox_id=sandbox_id,
+                        code=code,
+                        review=review_result,
+                        source="execute_code",
+                        review_time=0.0,  # TODO: Track actual review time
+                        model_used="llama3.1:latest"  # TODO: Get from filter
                     )
 
                     if review_result.decision == "reject":
@@ -506,16 +506,13 @@ Reasons:
                     )
                     # Log skipped review due to timeout
                     log_llm_review(
-                        sandbox_id,
-                        len(code),
-                        {
+                        sandbox_id=sandbox_id,
+                        code=code,
+                        review={
                             "decision": "skipped",
                             "confidence": 0.0,
-                            "reasons": [
-                                "LLM filter timed out (>30s)",
-                            ],
+                            "reasons": "LLM filter timed out (>30s)",
                             "threats_detected": [],
-                            "safe_alternative": None,
                         },
                         source="execute_code",
                     )
@@ -526,28 +523,26 @@ Reasons:
                     )
                     # Log skipped review due to error
                     log_llm_review(
-                        sandbox_id,
-                        len(code),
-                        {
+                        sandbox_id=sandbox_id,
+                        code=code,
+                        review={
                             "decision": "skipped",
                             "confidence": 0.0,
-                            "reasons": [f"LLM filter error: {e}"],
+                            "reasons": f"LLM filter error: {e}",
                             "threats_detected": ["review_error"],
-                            "safe_alternative": None,
                         },
                         source="execute_code",
                     )
             else:
                 # Log skipped review when filter unavailable
                 log_llm_review(
-                    sandbox_id,
-                    len(code),
-                    {
+                    sandbox_id=sandbox_id,
+                    code=code,
+                    review={
                         "decision": "skipped",
                         "confidence": 0.0,
-                        "reasons": ["LLM code filter unavailable"],
+                        "reasons": "LLM code filter unavailable",
                         "threats_detected": [],
-                        "safe_alternative": None,
                     },
                     source="execute_code",
                 )
@@ -1012,6 +1007,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             # Log request
             log_request(name, arguments, result_text, "success")
+            
+            # Register container ownership if token auth is enabled
+            if REQUIRE_TOKEN and MCP_API_TOKEN:
+                try:
+                    await http_client.post(
+                        f"{DASHBOARD_URL}/api/containers/register",
+                        headers={"X-API-Token": MCP_API_TOKEN},
+                        json={
+                            "container_id": result['sandbox_id'],
+                            "container_name": result['sandbox_id'],
+                            "sandbox_id": result['sandbox_id'],
+                        },
+                        timeout=5.0
+                    )
+                    logger.info(f"📦 Registered container ownership for {result['sandbox_id']}")
+                except Exception as e:
+                    logger.warning(f"Failed to register container: {e}")
 
             return [TextContent(type="text", text=result_text)]
 
