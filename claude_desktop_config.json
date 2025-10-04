@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "code-sandbox": {
+      "command": "poetry",
+      "args": [
+        "run",
+        "python",
+        "mcp_server.py"
+      ],
+      "cwd": "/path/to/a10-hackathon",
+      "env": {
+        "SANDBOX_IMAGE": "code-sandbox:latest",
+        "SANDBOX_TIMEOUT": "300",
+        "MAX_SANDBOXES": "10"
+      }
+    }
+  }
+}
+

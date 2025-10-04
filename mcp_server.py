@@ -32,6 +32,12 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# Configure logging FIRST before using logger
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("code-sandbox-mcp")
+
 # Optional: Import monitoring if available
 try:
     from monitor import get_monitor
@@ -41,11 +47,16 @@ except ImportError:
     MONITORING_ENABLED = False
     logger.warning("Monitoring module not available - monitoring tools disabled")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("code-sandbox-mcp")
+# Optional: Import code safety filter
+try:
+    from code_safety_filter import get_filter as get_code_filter
+
+    CODE_FILTER_ENABLED = True
+except ImportError:
+    CODE_FILTER_ENABLED = False
+    logger.warning(
+        "Code safety filter not available - LLM pre-execution review disabled"
+    )
 
 # Configuration
 IMAGE_NAME = os.getenv("SANDBOX_IMAGE", "code-sandbox:latest")
@@ -71,6 +82,93 @@ docker_client = docker.from_env()
 http_client = httpx.AsyncClient(timeout=30.0)
 sandboxes: Dict[str, Dict[str, Any]] = {}
 sandbox_owners: Dict[str, str] = {}  # sandbox_id -> session_id
+request_history: list = []  # Store recent MCP requests
+MAX_HISTORY_SIZE = 100  # Keep last 100 requests
+# Resolve paths relative to this file to avoid CWD mismatches across processes
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_FILE = os.path.join(
+    BASE_DIR, "mcp_requests.json"
+)  # Shared file for cross-process access
+
+
+# Load existing history on startup
+def load_existing_history():
+    """Load existing request history from file on startup."""
+    import json
+
+    global request_history
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r") as f:
+                request_history = json.load(f)
+                logger.info(
+                    f"📊 Loaded {len(request_history)} existing MCP requests from history"
+                )
+    except Exception as e:
+        logger.warning(f"Could not load existing history: {e}")
+        request_history = []
+
+
+# Load history immediately
+load_existing_history()
+
+
+def log_request(tool_name: str, arguments: Dict, result: str, status: str = "success"):
+    """Log MCP request to history (both in-memory and file)."""
+    import json
+    from datetime import datetime
+
+    request_entry = {
+        "timestamp": time.time(),
+        "datetime": datetime.now().isoformat(),  # Human-readable timestamp
+        "tool": tool_name,
+        "arguments": arguments,
+        "status": status,
+        "result_preview": result[:200] if len(result) > 200 else result,
+        "session_id": current_session_id,
+    }
+
+    # Keep only last MAX_HISTORY_SIZE requests in memory
+    request_history.append(request_entry)
+    if len(request_history) > MAX_HISTORY_SIZE:
+        request_history.pop(0)
+
+    # Also save to file for cross-process access
+    try:
+        # Get absolute path to ensure we know where we're writing
+        history_path = os.path.abspath(HISTORY_FILE)
+        logger.info(f"📝 Logging {tool_name} ({status}) to {history_path}")
+
+        with open(history_path, "w") as f:
+            json.dump(request_history, f, indent=2)
+
+        logger.info(f"✅ Logged successfully - total history: {len(request_history)}")
+    except PermissionError as e:
+        logger.error(f"❌ Permission denied writing to {history_path}: {e}")
+        logger.error(
+            f"   Check file permissions or use a different HISTORY_FILE location"
+        )
+    except Exception as e:
+        logger.error(f"❌ Failed to save request history to file: {e}")
+        logger.error(f"   File path: {os.path.abspath(HISTORY_FILE)}")
+        logger.error(f"   Current directory: {os.getcwd()}")
+
+
+def get_request_history(limit: int = 50) -> list:
+    """Get recent request history."""
+    # Try to load from file first (for cross-process access)
+    import json
+
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r") as f:
+                history = json.load(f)
+                return list(reversed(history[-limit:]))
+    except Exception as e:
+        logger.debug(f"Failed to load request history from file: {e}")
+
+    # Fallback to in-memory
+    return list(reversed(request_history[-limit:]))
 
 
 class SandboxManager:
@@ -230,6 +328,83 @@ class SandboxManager:
         if sandbox_id not in sandboxes:
             raise ValueError(f"Sandbox {sandbox_id} not found")
 
+        # SECURITY: LLM-based code review before execution
+        if CODE_FILTER_ENABLED:
+            code_filter = get_code_filter()
+            if code_filter:
+                try:
+                    logger.info("🛡️ Running LLM security review before execution...")
+                    logger.info(f"   Container: {sandbox_id}")
+                    logger.info(f"   Code length: {len(code)} bytes")
+
+                    # Run LLM review with timeout to prevent hanging
+                    review_result = await asyncio.wait_for(
+                        asyncio.to_thread(code_filter.review_code, code),
+                        timeout=30.0,  # 30 second timeout
+                    )
+
+                    # Log detailed results
+                    logger.info(f"🤖 LLM Review Result:")
+                    logger.info(f"   Decision: {review_result.decision.upper()}")
+                    logger.info(f"   Confidence: {review_result.confidence:.1%}")
+                    if review_result.threats_detected:
+                        logger.info(
+                            f"   Threats: {', '.join(review_result.threats_detected)}"
+                        )
+                    if review_result.reasons:
+                        logger.info(
+                            f"   Reasons: {'; '.join(review_result.reasons[:2])}"
+                        )  # First 2 reasons
+
+                    if review_result.decision == "reject":
+                        # Code rejected by LLM filter
+                        logger.error(
+                            f"❌ CODE REJECTED by LLM filter for sandbox {sandbox_id}"
+                        )
+                        logger.error(
+                            f"   Threats: {', '.join(review_result.threats_detected)}"
+                        )
+
+                        error_message = f"""
+🚫 CODE REJECTED BY SECURITY FILTER
+
+The LLM security agent has identified potential threats in your code and rejected execution.
+
+Decision: REJECT
+Confidence: {review_result.confidence:.1%}
+
+Threats Detected:
+{chr(10).join(f'  - {threat}' for threat in review_result.threats_detected)}
+
+Reasons:
+{chr(10).join(f'  - {reason}' for reason in review_result.reasons)}
+"""
+
+                        if review_result.safe_alternative:
+                            error_message += f"\n\nSuggested Safe Alternative:\n{review_result.safe_alternative}\n"
+
+                        error_message += "\n" + "=" * 60
+                        error_message += "\nYour Code:\n" + "=" * 60 + "\n"
+                        error_message += code
+                        error_message += "\n" + "=" * 60
+
+                        raise ValueError(error_message)
+                    else:
+                        logger.info(
+                            f"✅ CODE APPROVED by LLM filter for sandbox {sandbox_id}"
+                        )
+
+                except asyncio.TimeoutError:
+                    logger.error("⏱️ LLM filter timed out after 30 seconds")
+                    logger.warning(
+                        "⚠️ Proceeding with code execution WITHOUT LLM review"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ LLM filter error: {e}")
+                    logger.warning(
+                        "⚠️ Proceeding with code execution WITHOUT LLM review"
+                    )
+
         logger.info(f"Executing code in sandbox: {sandbox_id}")
 
         try:
@@ -262,14 +437,19 @@ class SandboxManager:
                         container, sandbox_id, code
                     )
                 raise ValueError("Execution timeout - code took too long to execute")
-            except httpx.ConnectError:
-                # Container might have crashed
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                # Container might have crashed or been terminated
+                logger.warning(
+                    f"Connection error during execution: {type(e).__name__}: {e}"
+                )
                 await asyncio.to_thread(container.reload)
                 if container.status != "running":
                     return await SandboxManager._handle_container_crash(
                         container, sandbox_id, code
                     )
-                raise ValueError("Cannot connect to sandbox - it may have crashed")
+                raise ValueError(
+                    f"Cannot connect to sandbox - connection error: {type(e).__name__}"
+                )
 
             if not response.is_success:
                 raise ValueError(f"Execution failed: {response.text}")
@@ -332,6 +512,8 @@ class SandboxManager:
 
         # Determine crash reason
         crash_reason = "UNKNOWN"
+        mining_detected = False
+
         if oom_killed:
             crash_reason = "OUT_OF_MEMORY"
         elif exit_code == 137:
@@ -339,7 +521,7 @@ class SandboxManager:
             if "fork" in logs_str.lower() or "process" in logs_str.lower():
                 crash_reason = "PROCESS_LIMIT_EXCEEDED (possible fork bomb)"
             else:
-                crash_reason = "KILLED (possibly OOM)"
+                crash_reason = "KILLED (SIGKILL)"
         elif exit_code == 139:
             crash_reason = "SEGMENTATION_FAULT"
 
@@ -349,14 +531,54 @@ class SandboxManager:
             monitor = get_monitor()
             crash_info = monitor.get_crash_by_container(sandbox_id)
             if crash_info:
+                # Check if it was mining detection
+                if "mining" in crash_info.get("crash_reason", "").lower():
+                    crash_reason = "🔪 TERMINATED BY MINING DETECTOR"
+                    mining_detected = True
+
                 crash_details = (
-                    f"\n\nCrash Details:\n"
+                    f"\n\n🔍 Monitor Detection:\n"
                     f"  Reason: {crash_info['crash_reason']}\n"
                     f"  Exit Code: {crash_info['exit_code']}\n"
                     f"  OOM Killed: {crash_info['oom_killed']}"
                 )
 
-        error_message = f"""
+        # Build appropriate error message based on crash reason
+        if mining_detected:
+            error_message = f"""
+⛏️  CONTAINER TERMINATED - MINING ACTIVITY DETECTED
+
+🔪 The monitoring system detected cryptocurrency mining activity and terminated the container.
+
+{crash_details}
+
+Exit Code: {exit_code}
+
+⚠️  Mining Activity Indicators:
+- Sustained high CPU usage (near 50% quota limit)
+- Continuous hashing operations detected
+- Pattern matching: mining/cryptocurrency keywords
+- ML model flagged the activity as suspicious
+
+Code that triggered the detection:
+{'-' * 60}
+{code[:500]}{'...' if len(code) > 500 else ''}
+{'-' * 60}
+
+Container Logs (last 50 lines):
+{'-' * 60}
+{logs_str}
+{'-' * 60}
+
+📊 This is a security feature that protects against:
+- Cryptocurrency mining abuse
+- Resource exhaustion attacks  
+- Unauthorized compute usage
+
+Check the observability dashboard for detailed metrics and detection logs.
+"""
+        else:
+            error_message = f"""
 🔥 CONTAINER CRASHED DURING EXECUTION
 
 Crash Reason: {crash_reason}
@@ -396,6 +618,7 @@ Check the observability dashboard for detailed metrics.
                 "oom_killed": oom_killed,
                 "reason": crash_reason,
                 "logs": logs_str,
+                "mining_detected": mining_detected,
             },
         }
 
@@ -611,30 +834,33 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls."""
+    start_time = time.time()
+    status = "success"
+    result_text = ""
+
     try:
         if name == "create_sandbox":
             result = await SandboxManager.create_sandbox(current_session_id)
-            return [
-                TextContent(
-                    type="text",
-                    text=f"✅ Sandbox created successfully!\n\n"
-                    f"Sandbox ID: {result['sandbox_id']}\n"
-                    f"Status: {result['status']}\n\n"
-                    f"You can now execute Python code using execute_python with this sandbox_id.",
-                )
-            ]
+            result_text = (
+                f"✅ Sandbox created successfully!\n\n"
+                f"Sandbox ID: {result['sandbox_id']}\n"
+                f"Status: {result['status']}\n\n"
+                f"You can now execute Python code using execute_python with this sandbox_id."
+            )
+
+            # Log request
+            log_request(name, arguments, result_text, "success")
+
+            return [TextContent(type="text", text=result_text)]
 
         elif name == "execute_python":
             sandbox_id = arguments.get("sandbox_id")
             code = arguments.get("code")
 
             if not sandbox_id or not code:
-                return [
-                    TextContent(
-                        type="text",
-                        text="❌ Error: Both sandbox_id and code are required",
-                    )
-                ]
+                result_text = "❌ Error: Both sandbox_id and code are required"
+                log_request(name, arguments, result_text, "error")
+                return [TextContent(type="text", text=result_text)]
 
             result = await SandboxManager.execute_code(
                 sandbox_id, code, current_session_id
@@ -652,7 +878,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     if item["type"] == "error":
                         output_parts.append(item["content"])
 
-                return [TextContent(type="text", text="\n".join(output_parts))]
+                result_text = "\n".join(output_parts)
+                log_request(
+                    name,
+                    {"sandbox_id": sandbox_id, "code_length": len(code)},
+                    result_text,
+                    "crashed",
+                )
+                return [TextContent(type="text", text=result_text)]
 
             # Normal execution
             output_parts.append(f"📊 Execution Status: {result['status']}\n")
@@ -669,7 +902,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif item["type"] == "stderr":
                     output_parts.append(f"⚠️  Stderr:\n{item['content']}")
 
-            return [TextContent(type="text", text="\n\n".join(output_parts))]
+            result_text = "\n\n".join(output_parts)
+            log_request(
+                name,
+                {"sandbox_id": sandbox_id, "code_length": len(code)},
+                result_text,
+                "success",
+            )
+            return [TextContent(type="text", text=result_text)]
 
         elif name == "list_sandboxes":
             sandboxes_list = await SandboxManager.list_sandboxes(current_session_id)
@@ -725,17 +965,59 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     f"Fetched {fetch_result['size']} bytes from {url}, executing in {sandbox_id}"
                 )
             except ValueError as e:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"❌ Error fetching code from URL:\n{str(e)}",
-                    )
-                ]
+                result_text = f"❌ Error fetching code from URL:\n{str(e)}"
+                log_request(
+                    name, {"sandbox_id": sandbox_id, "url": url}, result_text, "error"
+                )
+                return [TextContent(type="text", text=result_text)]
+            except Exception as e:
+                result_text = f"❌ Unexpected error fetching code:\n{str(e)}"
+                log_request(
+                    name, {"sandbox_id": sandbox_id, "url": url}, result_text, "error"
+                )
+                return [TextContent(type="text", text=result_text)]
 
-            # Execute the fetched code
-            result = await SandboxManager.execute_code(
-                sandbox_id, code, current_session_id
-            )
+            # Execute the fetched code (will go through LLM filter if enabled)
+            try:
+                logger.info(
+                    f"🔍 Executing fetched code in sandbox {sandbox_id} (will be filtered by LLM)"
+                )
+                result = await SandboxManager.execute_code(
+                    sandbox_id, code, current_session_id
+                )
+            except ValueError as e:
+                # Handle LLM rejection or sandbox validation errors
+                error_str = str(e)
+
+                # Check if it's an LLM rejection (contains specific markers)
+                if "CODE REJECTED BY SECURITY FILTER" in error_str or "🚫" in error_str:
+                    status = "rejected"
+                    result_text = f"📥 Fetched code from: {url}\n   Size: {fetch_result['size']} bytes\n\n{error_str}"
+                    logger.warning(f"❌ LLM REJECTED code from URL: {url}")
+                else:
+                    # Other validation errors (sandbox not found, access denied, etc.)
+                    status = "error"
+                    result_text = f"📥 Fetched code from: {url}\n   Size: {fetch_result['size']} bytes\n\n❌ {error_str}"
+                    logger.error(f"❌ Validation error for URL execution: {error_str}")
+
+                log_request(
+                    name,
+                    {"sandbox_id": sandbox_id, "url": url, "code_length": len(code)},
+                    result_text,
+                    status,
+                )
+                return [TextContent(type="text", text=result_text)]
+            except Exception as e:
+                # Handle execution errors (container not running, etc.)
+                result_text = f"📥 Fetched code from: {url}\n   Size: {fetch_result['size']} bytes\n\n❌ Execution failed:\n{str(e)}"
+                logger.error(f"❌ Execution error: {str(e)}")
+                log_request(
+                    name,
+                    {"sandbox_id": sandbox_id, "url": url, "code_length": len(code)},
+                    result_text,
+                    "error",
+                )
+                return [TextContent(type="text", text=result_text)]
 
             # Format results
             output_parts = []
@@ -756,7 +1038,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     if item["type"] == "error":
                         output_parts.append(item["content"])
 
-                return [TextContent(type="text", text="\n".join(output_parts))]
+                result_text = "\n".join(output_parts)
+                log_request(
+                    name,
+                    {"sandbox_id": sandbox_id, "url": url, "code_length": len(code)},
+                    result_text,
+                    "crashed",
+                )
+                return [TextContent(type="text", text=result_text)]
 
             # Normal execution
             output_parts.append(f"📊 Execution Status: {result['status']}\n")
@@ -773,7 +1062,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 elif item["type"] == "stderr":
                     output_parts.append(f"⚠️  Stderr:\n{item['content']}")
 
-            return [TextContent(type="text", text="\n\n".join(output_parts))]
+            result_text = "\n\n".join(output_parts)
+            log_request(
+                name,
+                {"sandbox_id": sandbox_id, "url": url, "code_length": len(code)},
+                result_text,
+                "success",
+            )
+            return [TextContent(type="text", text=result_text)]
 
         elif name == "inspect_container" and MONITORING_ENABLED:
             sandbox_id = arguments.get("sandbox_id")
@@ -866,11 +1162,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(output))]
 
         else:
-            return [TextContent(type="text", text=f"❌ Unknown tool: {name}")]
+            result_text = f"❌ Unknown tool: {name}"
+            log_request(name, arguments, result_text, "error")
+            return [TextContent(type="text", text=result_text)]
 
     except Exception as e:
         logger.error(f"Tool error ({name}): {e}", exc_info=True)
-        return [TextContent(type="text", text=f"❌ Error: {str(e)}")]
+        result_text = f"❌ Error: {str(e)}"
+        log_request(name, arguments, result_text, "error")
+        return [TextContent(type="text", text=result_text)]
 
 
 async def main():
@@ -881,6 +1181,18 @@ async def main():
     logger.info(f"  Idle Timeout: {IDLE_TIMEOUT}s")
     logger.info(f"  Max Sandboxes: {MAX_SANDBOXES}")
     logger.info(f"  Monitoring: {'Enabled' if MONITORING_ENABLED else 'Disabled'}")
+    logger.info(
+        f"  🛡️  LLM Code Filter: {'Enabled' if CODE_FILTER_ENABLED else 'Disabled'}"
+    )
+    logger.info(f"  📝 Request History: {os.path.abspath(HISTORY_FILE)}")
+    logger.info(f"  📂 Working Directory: {os.getcwd()}")
+
+    if CODE_FILTER_ENABLED:
+        logger.info(
+            f"     → All code execution (execute_python & execute_from_url) will be"
+        )
+        logger.info(f"       analyzed by Ollama LLM before running in sandboxes")
+        logger.info(f"     → Malicious code will be rejected automatically")
 
     # Start monitoring if enabled
     monitoring_task = None

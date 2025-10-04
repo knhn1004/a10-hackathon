@@ -363,6 +363,108 @@
             border-radius: 8px;
             margin: 20px 0;
         }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin: 30px 0 20px 0;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .tab:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .tab.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .request-item {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .request-item:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .request-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .request-tool {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .request-time {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .request-status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success-color);
+        }
+
+        .status-error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger-color);
+        }
+
+        .status-crashed {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning-color);
+        }
+
+        .request-preview {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-top: 8px;
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-height: 60px;
+        }
     </style>
 </head>
 
@@ -418,10 +520,25 @@
         </div>
     </div>
 
-    <!-- Containers -->
-    <div class="containers-section" id="containers-section" style="display: none;">
-        <h2 class="section-title">Active Containers</h2>
-        <div class="container-grid" id="container-grid"></div>
+    <!-- Tabs -->
+    <div class="tabs" id="tabs" style="display: none;">
+        <button class="tab active" onclick="switchTab('containers')">Active Containers</button>
+        <button class="tab" onclick="switchTab('requests')">MCP Requests</button>
+    </div>
+
+    <!-- Tab Contents -->
+    <div id="tab-contents" style="display: none;">
+        <!-- Containers Tab -->
+        <div class="tab-content active" id="containers-tab">
+            <h2 class="section-title">Active Containers</h2>
+            <div class="container-grid" id="container-grid"></div>
+        </div>
+
+        <!-- MCP Requests Tab -->
+        <div class="tab-content" id="requests-tab">
+            <h2 class="section-title">MCP Function Calls</h2>
+            <div id="requests-list"></div>
+        </div>
     </div>
 
     <!-- Modal for container details -->
@@ -550,7 +667,8 @@
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('stats-grid').style.display = 'grid';
                 document.getElementById('charts-container').style.display = 'grid';
-                document.getElementById('containers-section').style.display = 'block';
+                document.getElementById('tabs').style.display = 'flex';
+                document.getElementById('tab-contents').style.display = 'block';
 
                 // Clear errors
                 document.getElementById('error-container').innerHTML = '';
@@ -558,6 +676,95 @@
             } catch (error) {
                 console.error('Error updating dashboard:', error);
                 showError('Failed to fetch data: ' + error.message);
+            }
+        }
+
+        // Update MCP requests
+        async function updateMCPRequests() {
+            try {
+                const response = await fetch('/api/requests/history?limit=20');
+                
+                if (!response.ok) {
+                    throw new Error('MCP requests not available');
+                }
+
+                const data = await response.json();
+                displayMCPRequests(data.requests);
+            } catch (error) {
+                console.log('MCP requests not available:', error.message);
+                // Show placeholder
+                const container = document.getElementById('requests-list');
+                if (container) {
+                    container.innerHTML = '<div class="loading">No MCP requests yet. Run code through MCP server to see history.</div>';
+                }
+            }
+        }
+
+        // Display MCP requests
+        function displayMCPRequests(requests) {
+            const container = document.getElementById('requests-list');
+            
+            if (!requests || requests.length === 0) {
+                container.innerHTML = '<div class="loading">No MCP requests yet. Run code through MCP server to see history.</div>';
+                return;
+            }
+
+            container.innerHTML = '';
+
+            requests.forEach(req => {
+                const item = document.createElement('div');
+                item.className = 'request-item';
+
+                const timestamp = new Date(req.timestamp * 1000);
+                const timeStr = timestamp.toLocaleTimeString();
+                
+                // Status class
+                const statusClass = `status-${req.status}`;
+
+                // Format arguments for display
+                let argsStr = '';
+                if (req.arguments) {
+                    if (req.arguments.sandbox_id) {
+                        argsStr = `sandbox: ${req.arguments.sandbox_id}`;
+                    }
+                    if (req.arguments.code_length) {
+                        argsStr += ` • code: ${req.arguments.code_length} bytes`;
+                    }
+                    if (req.arguments.url) {
+                        argsStr += ` • url: ${req.arguments.url}`;
+                    }
+                }
+
+                item.innerHTML = `
+                    <div class="request-header">
+                        <div>
+                            <div class="request-tool">${req.tool}</div>
+                            <div class="request-time">${timeStr}${argsStr ? ' • ' + argsStr : ''}</div>
+                        </div>
+                        <span class="request-status ${statusClass}">${req.status}</span>
+                    </div>
+                    ${req.result_preview ? `<div class="request-preview">${req.result_preview}</div>` : ''}
+                `;
+
+                container.appendChild(item);
+            });
+        }
+
+        // Switch between tabs
+        function switchTab(tabName) {
+            // Update tab buttons
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Update tab contents
+            const contents = document.querySelectorAll('.tab-content');
+            contents.forEach(content => content.classList.remove('active'));
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+
+            // Load MCP requests if switching to that tab
+            if (tabName === 'requests') {
+                updateMCPRequests();
             }
         }
 
@@ -760,7 +967,15 @@
             updateDashboard();
 
             // Update every 2 seconds
-            updateInterval = setInterval(updateDashboard, 2000);
+            updateInterval = setInterval(() => {
+                updateDashboard();
+                
+                // Also update MCP requests if on that tab
+                const requestsTab = document.getElementById('requests-tab');
+                if (requestsTab && requestsTab.classList.contains('active')) {
+                    updateMCPRequests();
+                }
+            }, 2000);
         };
 
         // Clean up on unload

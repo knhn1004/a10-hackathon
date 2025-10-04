@@ -943,7 +943,9 @@ class ContainerMonitor:
                     f"(ran for {runtime/60:.1f} minutes)"
                 )
             except Exception as e:
-                logger.error(f"Failed to kill long-running container {container_id}: {e}")
+                logger.error(
+                    f"Failed to kill long-running container {container_id}: {e}"
+                )
 
             return alert
 
@@ -1087,7 +1089,9 @@ class ContainerMonitor:
                             )
 
                         # Check if container has been running too long
-                        runtime_alert = await self._check_long_running_containers(metrics)
+                        runtime_alert = await self._check_long_running_containers(
+                            metrics
+                        )
                         if runtime_alert:
                             self.network_alerts.append(runtime_alert)
                             logger.error(runtime_alert.message)

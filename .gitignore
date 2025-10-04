@@ -99,3 +99,5 @@ training_history/
 plots/
 metrics/
 
+a MCP request history
+mcp_requests.json

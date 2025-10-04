@@ -1,10 +1,15 @@
 {
   "mcpServers": {
     "code-sandbox": {
-      "command": "/path/to/virtualenv/bin/python",
+      "command": "poetry",
       "args": [
-        "/absolute/path/to/mcp_server.py"
+        "-C",
+        "/absolute/path/to/a10-hackathon",
+        "run",
+        "python",
+        "mcp_server.py"
       ],
+      "cwd": "/absolute/path/to/a10-hackathon",
       "env": {
         "SANDBOX_IMAGE": "code-sandbox:latest",
         "SANDBOX_TIMEOUT": "300",
@@ -13,14 +18,3 @@
     }
   }
 }
-
-// Example configuration for Claude Desktop
-// 
-// To use:
-// 1. Find your virtualenv path: cd /path/to/project && poetry env info -p
-// 2. Replace "/path/to/virtualenv/bin/python" with <output>/bin/python
-// 3. Replace "/absolute/path/to/mcp_server.py" with full path to mcp_server.py
-// 4. Copy to: ~/Library/Application Support/Claude/claude_desktop_config.json
-//    (macOS) or appropriate location for your OS
-// 5. Restart Claude Desktop
-
