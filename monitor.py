@@ -12,7 +12,9 @@ Provides historical data storage and real-time updates.
 """
 
 import asyncio
+import json
 import logging
+import math
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
@@ -22,21 +24,28 @@ from datetime import datetime
 import docker
 from docker.models.containers import Container
 
-# Optional ML mining detector
-try:
-    from ml_mining_detector import MiningDetectorML
+# Random Forest detector DISABLED - using PyTorch LSTM only
+ML_DETECTOR_AVAILABLE = False
 
-    ML_DETECTOR_AVAILABLE = True
+# PyTorch temporal sequence detector (preferred)
+TEMPORAL_DETECTOR_AVAILABLE = False
+try:
+    from ml_temporal_detector import TemporalDetectorInference, PYTORCH_AVAILABLE
+
+    if PYTORCH_AVAILABLE:
+        TEMPORAL_DETECTOR_AVAILABLE = True
+        logging.info("✅ PyTorch temporal detector available")
 except ImportError:
-    ML_DETECTOR_AVAILABLE = False
-    logging.info("ML mining detector not available (optional)")
+    logging.info("Temporal detector not available (install PyTorch: poetry add torch)")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("monitor")
 
 # Configuration
 METRICS_HISTORY_SIZE = 300  # Keep 5 minutes of data (1 sample per second)
-COLLECTION_INTERVAL = 1.0  # Collect metrics every second
+COLLECTION_INTERVAL = (
+    0.02  # Collect metrics every 20ms (50 samples/sec for ultra-fast code)
+)
 
 # Network monitoring thresholds
 NETWORK_RATE_WARNING_MBPS = 10  # Warn if > 10 MB/s
@@ -140,7 +149,7 @@ class NetworkAlert:
 @dataclass
 class MLPrediction:
     """ML model prediction record (all predictions, not just alerts)."""
-    
+
     container_id: str
     name: str
     timestamp: float
@@ -148,6 +157,22 @@ class MLPrediction:
     confidence: float
     features: Dict[str, float]  # CPU, memory, network metrics
     samples: int  # Number of samples analyzed
+    is_final: bool = False  # True for the final prediction, False for intermediate
+
+
+@dataclass
+class MLTimeSeries:
+    """Time series of ML predictions for live wave graph."""
+
+    container_id: str
+    name: str
+    timestamps: List[float]  # Timestamp for each prediction
+    predictions: List[str]  # Prediction at each timestep
+    confidences: List[float]  # Confidence at each timestep
+    features_history: List[Dict[str, float]] = (
+        None  # Features at each timestep for tooltips
+    )
+    attention_weights: Optional[List[float]] = None  # Attention from final prediction
 
 
 @dataclass
@@ -195,6 +220,9 @@ class ContainerMonitor:
         self.ml_predictions: Deque[MLPrediction] = deque(
             maxlen=200
         )  # Last 200 ML predictions (ALL predictions, not just alerts)
+        self.ml_time_series: Dict[str, MLTimeSeries] = (
+            {}
+        )  # Container ID -> time series of predictions (for wave graph)
         self.tracked_containers: Dict[str, Dict] = {}  # Container tracking data
         self.high_cpu_start_times: Dict[str, float] = {}  # Track when high CPU started
         self.moderate_cpu_start_times: Dict[str, float] = (
@@ -204,21 +232,37 @@ class ContainerMonitor:
             {}
         )  # Cache recent logs for pattern detection
 
-        # ML mining detector (optional)
+        # Store raw stats sequences for temporal model
+        self.container_stats_sequences: Dict[str, Deque[Dict]] = (
+            {}
+        )  # Container ID -> sequence of raw stats
+
+        # ML mining detector (Random Forest - optional, keeping for compatibility)
         self.ml_detector: Optional["MiningDetectorML"] = None
         if ML_DETECTOR_AVAILABLE:
             try:
                 self.ml_detector = MiningDetectorML()
                 if self.ml_detector.model is not None:
-                    logger.info("🤖 ML mining detector loaded successfully")
+                    logger.info(
+                        "🤖 ML mining detector (Random Forest) loaded successfully"
+                    )
                 else:
                     logger.info(
                         "ML mining detector available but no trained model found"
                     )
-                    self.ml_detector = None
             except Exception as e:
                 logger.warning(f"Failed to load ML mining detector: {e}")
                 self.ml_detector = None
+
+        # Temporal detector (PyTorch LSTM - preferred)
+        self.temporal_detector: Optional["TemporalDetectorInference"] = None
+        if TEMPORAL_DETECTOR_AVAILABLE:
+            try:
+                self.temporal_detector = TemporalDetectorInference()
+                logger.info("🧠 PyTorch temporal detector initialized")
+            except Exception as e:
+                logger.warning(f"Failed to load temporal detector: {e}")
+                self.temporal_detector = None
 
     async def collect_container_metrics(
         self, container: Container
@@ -227,6 +271,13 @@ class ContainerMonitor:
         try:
             # Get container info
             await asyncio.to_thread(container.reload)
+
+            # Skip if container has stopped
+            if container.status != "running":
+                logger.debug(
+                    f"Container {container.id[:12]} is {container.status}, skipping metrics"
+                )
+                return None
 
             # Get container stats (non-streaming)
             stats = await asyncio.to_thread(container.stats, stream=False)
@@ -237,6 +288,12 @@ class ContainerMonitor:
                     f"Container {container.id[:12]}: stats is not a dict, got {type(stats)}"
                 )
                 return None
+
+            # Store raw stats for temporal model (keep last 10 for sequence)
+            container_id = container.id[:12]
+            if container_id not in self.container_stats_sequences:
+                self.container_stats_sequences[container_id] = deque(maxlen=10)
+            self.container_stats_sequences[container_id].append(stats)
 
             # Parse CPU usage
             cpu_percent = self._calculate_cpu_percent(container.id, stats)
@@ -398,6 +455,12 @@ class ContainerMonitor:
                 timestamp=current_time,
             )
 
+        except json.JSONDecodeError as e:
+            # Container likely stopped mid-collection, skip gracefully
+            logger.debug(
+                f"Container {container.id[:12]} returned invalid JSON (likely stopped): {e}"
+            )
+            return None
         except Exception as e:
             logger.error(f"Error collecting metrics for {container.id[:12]}: {e}")
             return None
@@ -799,46 +862,94 @@ class ContainerMonitor:
         self, metrics: ContainerMetrics
     ) -> Optional[NetworkAlert]:
         """
-        Use ML model to detect mining patterns.
+        Use PyTorch temporal LSTM model to detect mining patterns in real-time.
 
-        Analyzes time series features including CPU patterns, memory trends,
-        network activity, and log output to detect mining with high accuracy.
+        Analyzes sequences of Docker stats to detect temporal anomalies.
+        Creates wave graph data showing confidence over time.
 
         Returns alert if high-confidence mining detected, None otherwise.
         """
-        if not self.ml_detector or not self.ml_detector.model:
+        # Only use temporal detector (Random Forest removed)
+        if self.temporal_detector is None:
+            logger.warning(f"⚠️ Temporal detector is None for {metrics.name}")
             return None
+
+        logger.info(f"🔬 _check_ml_mining called for {metrics.name}")
 
         container_id = metrics.container_id
         current_time = time.time()
 
-        # Need enough history for ML prediction
-        history = self.metrics_history.get(container_id)
-        if not history or len(history) < ML_MINING_MIN_SAMPLES:
+        # Initialize time series for this container if needed
+        if container_id not in self.ml_time_series:
+            self.ml_time_series[container_id] = MLTimeSeries(
+                container_id=container_id,
+                name=metrics.name,
+                timestamps=[],
+                predictions=[],
+                confidences=[],
+                features_history=[],
+                attention_weights=None,
+            )
+
+        # Use stats sequence for temporal model
+        stats_sequence = self.container_stats_sequences.get(container_id, deque())
+        # With 50 samples/sec, we get 3 samples in 60ms - good for fast code
+        logger.info(
+            f"🔍 Checking temporal for {metrics.name}: {len(stats_sequence)} samples in sequence"
+        )
+        if len(stats_sequence) < 2:  # Need at least 2 samples
+            logger.info(
+                f"⚠️ Not enough samples for {metrics.name}: {len(stats_sequence)}/2"
+            )
             return None
 
         try:
-            # Get recent metrics for ML analysis
-            recent_metrics = list(history)[-ML_MINING_MIN_SAMPLES:]
-            metrics_dicts = [asdict(m) for m in recent_metrics]
-
-            # Get logs for pattern analysis
-            log_text = self.container_log_cache.get(container_id, "")
-
-            # Extract features and predict
-            features = self.ml_detector.extract_features(metrics_dicts, log_text)
-            prediction, confidence = self.ml_detector.predict(features)
-
-            # DEBUG: Log all predictions
+            # Run temporal model inference
             logger.info(
-                f"🤖 ML Prediction for {metrics.name}: {prediction} "
-                f"(confidence={confidence*100:.1f}%) | "
-                f"CPU mean={features.cpu_mean:.1f}%, "
-                f"sustained_moderate={features.cpu_sustained_moderate:.2f}, "
-                f"repetition={features.output_repetition_score:.3f}"
+                f"🚀 About to call temporal_detector.predict with {len(stats_sequence)} samples"
             )
-            
-            # Store ALL predictions (not just alerts) for dashboard
+            prediction, confidence, attention_dict = self.temporal_detector.predict(
+                list(stats_sequence)
+            )
+            logger.info(f"✅ Prediction successful: {prediction} ({confidence:.2%})")
+
+            # Extract current features for tooltip
+            current_features = {
+                "cpu_percent": round(metrics.cpu_percent, 2),
+                "memory_mb": round(metrics.memory_usage_mb, 2),
+                "memory_percent": round(metrics.memory_percent, 2),
+                "network_rx_rate": round(metrics.network_rx_rate / 1024, 2),  # KB/s
+                "network_tx_rate": round(metrics.network_tx_rate / 1024, 2),  # KB/s
+                "block_read_mb": round(
+                    metrics.block_read_bytes / (1024 * 1024), 2
+                ),  # MB
+                "block_write_mb": round(
+                    metrics.block_write_bytes / (1024 * 1024), 2
+                ),  # MB
+                "sequence_length": len(stats_sequence),
+            }
+
+            # Store intermediate prediction for wave graph
+            self.ml_time_series[container_id].timestamps.append(current_time)
+            self.ml_time_series[container_id].predictions.append(prediction)
+            self.ml_time_series[container_id].confidences.append(confidence)
+            self.ml_time_series[container_id].features_history.append(current_features)
+
+            # Log prediction
+            logger.info(
+                f"🧠 Temporal LSTM Prediction for {metrics.name}: {prediction} "
+                f"(confidence={confidence*100:.1f}%) | "
+                f"Sequence length={len(stats_sequence)}"
+            )
+
+            # Check if this is likely the final prediction (container will be deleted soon)
+            # We mark it final if confidence is stable or sequence is long enough
+            is_final = (
+                len(stats_sequence) >= 10
+                or len(self.ml_time_series[container_id].timestamps) >= 10
+            )
+
+            # Store prediction record
             ml_prediction_record = MLPrediction(
                 container_id=container_id,
                 name=metrics.name,
@@ -846,37 +957,27 @@ class ContainerMonitor:
                 prediction=prediction,
                 confidence=confidence,
                 features={
-                    # CPU features
-                    "cpu_mean": round(features.cpu_mean, 2),
-                    "cpu_std": round(features.cpu_std, 2),
-                    "cpu_max": round(features.cpu_max, 2),
-                    "cpu_min": round(features.cpu_min, 2),
-                    "cpu_trend": round(features.cpu_trend, 4),
-                    "cpu_sustained_high": round(features.cpu_sustained_high, 4),
-                    "cpu_sustained_moderate": round(features.cpu_sustained_moderate, 4),
-                    # Memory features
-                    "mem_mean": round(features.mem_mean, 2),
-                    "mem_std": round(features.mem_std, 2),
-                    "mem_trend": round(features.mem_trend, 4),
-                    # Network features
-                    "net_rx_rate_mean": round(features.net_rx_rate_mean, 2),
-                    "net_tx_rate_mean": round(features.net_tx_rate_mean, 2),
-                    "net_total_bytes": round(features.net_total_bytes, 2),
-                    "net_variance": round(features.net_variance, 2),
-                    # Block I/O features
-                    "block_read_rate": round(features.block_read_rate, 2),
-                    "block_write_rate": round(features.block_write_rate, 2),
-                    # Temporal features
-                    "execution_duration": round(features.execution_duration, 2),
-                    "sample_count": features.sample_count,
-                    # Log analysis
-                    "output_repetition": round(features.output_repetition_score, 4),
+                    "sequence_length": len(stats_sequence),
+                    "temporal_model": True,
+                    "attention_entropy": -sum(
+                        w * math.log(w + 1e-10)
+                        for w in attention_dict.values()
+                        if w > 0
+                    ),
                 },
-                samples=len(recent_metrics),
+                samples=len(stats_sequence),
+                is_final=is_final,
             )
+
+            # Store attention weights in time series (for final prediction)
+            if is_final:
+                self.ml_time_series[container_id].attention_weights = list(
+                    attention_dict.values()
+                )
+
             self.ml_predictions.append(ml_prediction_record)
 
-            # Act on high-confidence mining OR suspicious predictions (65%+)
+            # Act on high-confidence predictions
             if (
                 prediction == "mining" and confidence >= ML_MINING_CONFIDENCE_THRESHOLD
             ) or (prediction == "suspicious" and confidence >= 0.65):
@@ -897,52 +998,35 @@ class ContainerMonitor:
                     details={
                         "prediction": prediction,
                         "confidence": round(confidence, 4),
-                        "cpu_mean": round(features.cpu_mean, 2),
-                        "cpu_sustained_moderate": round(
-                            features.cpu_sustained_moderate, 4
-                        ),
-                        "output_repetition": round(features.output_repetition_score, 4),
-                        "model_type": "RandomForestClassifier",
+                        "sequence_length": len(stats_sequence),
+                        "model_type": "PyTorch_LSTM",
                     },
                     message=(
-                        f"🤖 ML {prediction.upper()} DETECTED: Container {metrics.name} "
+                        f"🧠 Temporal LSTM {prediction.upper()} DETECTED: {metrics.name} "
                         f"(confidence: {confidence*100:.1f}%) - "
-                        f"CPU mean: {features.cpu_mean:.1f}%, "
-                        f"Sustained moderate: {features.cpu_sustained_moderate*100:.1f}%, "
-                        f"Output repetition: {features.output_repetition_score:.3f}"
+                        f"Sequence: {len(stats_sequence)} samples"
                     ),
                     auto_killed=False,
                 )
 
-                # Auto-kill if enabled
                 if ML_MINING_AUTO_KILL:
                     try:
                         container = self.docker_client.containers.get(container_id)
                         await asyncio.to_thread(container.kill)
                         alert.auto_killed = True
-                        alert.message += " 🔪 Container TERMINATED by ML detector."
+                        alert.message += " 🔪 Container TERMINATED."
                         logger.error(
-                            f"🔪 TERMINATED container {metrics.name} - ML detected {prediction} "
-                            f"(confidence: {confidence*100:.1f}%)"
+                            f"🔪 TERMINATED {metrics.name} - LSTM detected {prediction}"
                         )
                     except Exception as e:
-                        logger.error(f"Failed to kill ML-detected container: {e}")
+                        logger.error(f"Failed to kill container: {e}")
 
                 return alert
 
-            # Log medium-confidence suspicious predictions
-            elif (
-                prediction == "mining" or prediction == "suspicious"
-            ) and confidence >= 0.70:
-                logger.warning(
-                    f"⚠️  Suspicious activity in {metrics.name}: "
-                    f"ML prediction={prediction}, confidence={confidence*100:.1f}% "
-                    f"(kill threshold=80.0%)"
-                )
-
         except Exception as e:
-            logger.debug(f"ML mining detection error for {container_id}: {e}")
+            logger.error(f"❌ Temporal ML error for {container_id}: {e}", exc_info=True)
 
+        # Random Forest detector removed - temporal only
         return None
 
     async def _check_long_running_containers(
@@ -1171,8 +1255,8 @@ class ContainerMonitor:
                         # Collect logs for ML detection
                         await self._check_log_patterns(metrics.container_id, metrics)
 
-                        # Check ML mining detection (if available and enough history)
-                        if self.ml_detector and self.ml_detector.model:
+                        # Check ML mining detection (PyTorch LSTM only)
+                        if self.temporal_detector:
                             ml_alert = await self._check_ml_mining(metrics)
                             if ml_alert:
                                 self.network_alerts.append(ml_alert)
@@ -1388,11 +1472,20 @@ class ContainerMonitor:
         ]
         recent = critical[-limit:]
         return [asdict(alert) for alert in recent]
-    
+
     def get_ml_predictions(self, limit: int = 100) -> List[Dict]:
         """Get ALL recent ML predictions (not just alerts)."""
         recent = list(self.ml_predictions)[-limit:]
         return [asdict(pred) for pred in recent]
+
+    def get_ml_time_series(self, container_id: Optional[str] = None) -> List[Dict]:
+        """Get time series of predictions for wave graph visualization."""
+        if container_id:
+            series = self.ml_time_series.get(container_id)
+            return [asdict(series)] if series else []
+        else:
+            # Return all active time series
+            return [asdict(series) for series in self.ml_time_series.values()]
 
 
 # Global monitor instance

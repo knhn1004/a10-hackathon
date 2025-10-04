@@ -990,7 +990,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = await SandboxManager.execute_code(
                 sandbox_id, code, current_session_id
             )
-            
+
             # Auto-cleanup if requested
             cleanup_message = ""
             if auto_cleanup and result.get("status") != "crashed":
@@ -998,7 +998,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     # Trigger final ML analysis before deletion
                     if MONITORING_ENABLED:
                         monitor = get_monitor()
-                        logger.info(f"Triggering final ML analysis for {sandbox_id} before deletion...")
+                        logger.info(
+                            f"Triggering final ML analysis for {sandbox_id} before deletion..."
+                        )
                         try:
                             # Get the container and do one final metrics collection + analysis
                             container = await asyncio.to_thread(
@@ -1008,13 +1010,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                             logger.info(f"Final ML analysis completed for {sandbox_id}")
                         except Exception as e:
                             logger.warning(f"Failed to run final ML analysis: {e}")
-                    
+
                     await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
-                    cleanup_message = "\n\n🗑️  Sandbox automatically deleted after execution."
+                    cleanup_message = (
+                        "\n\n🗑️  Sandbox automatically deleted after execution."
+                    )
                     logger.info(f"Auto-cleaned up sandbox: {sandbox_id}")
                 except Exception as e:
                     logger.warning(f"Failed to auto-cleanup sandbox {sandbox_id}: {e}")
-                    cleanup_message = f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
+                    cleanup_message = (
+                        f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
+                    )
 
             # Format results
             output_parts = []
@@ -1055,7 +1061,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result_text = "\n\n".join(output_parts) + cleanup_message
             log_request(
                 name,
-                {"sandbox_id": sandbox_id, "code_length": len(code), "auto_cleanup": auto_cleanup},
+                {
+                    "sandbox_id": sandbox_id,
+                    "code_length": len(code),
+                    "auto_cleanup": auto_cleanup,
+                },
                 result_text,
                 "success",
             )
@@ -1177,7 +1187,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     # Trigger final ML analysis before deletion
                     if MONITORING_ENABLED:
                         monitor = get_monitor()
-                        logger.info(f"Triggering final ML analysis for {sandbox_id} before deletion...")
+                        logger.info(
+                            f"Triggering final ML analysis for {sandbox_id} before deletion..."
+                        )
                         try:
                             # Get the container and do one final metrics collection + analysis
                             container = await asyncio.to_thread(
@@ -1187,13 +1199,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                             logger.info(f"Final ML analysis completed for {sandbox_id}")
                         except Exception as e:
                             logger.warning(f"Failed to run final ML analysis: {e}")
-                    
+
                     await SandboxManager.delete_sandbox(sandbox_id, current_session_id)
-                    cleanup_message = "\n\n🗑️  Sandbox automatically deleted after execution."
+                    cleanup_message = (
+                        "\n\n🗑️  Sandbox automatically deleted after execution."
+                    )
                     logger.info(f"Auto-cleaned up sandbox: {sandbox_id}")
                 except Exception as e:
                     logger.warning(f"Failed to auto-cleanup sandbox {sandbox_id}: {e}")
-                    cleanup_message = f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
+                    cleanup_message = (
+                        f"\n\n⚠️  Warning: Failed to auto-cleanup sandbox: {e}"
+                    )
 
             # Format results
             output_parts = []
@@ -1241,7 +1257,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result_text = "\n\n".join(output_parts) + cleanup_message
             log_request(
                 name,
-                {"sandbox_id": sandbox_id, "url": url, "code_length": len(code), "auto_cleanup": auto_cleanup},
+                {
+                    "sandbox_id": sandbox_id,
+                    "url": url,
+                    "code_length": len(code),
+                    "auto_cleanup": auto_cleanup,
+                },
                 result_text,
                 "success",
             )

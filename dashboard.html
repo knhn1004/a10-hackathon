@@ -549,6 +549,16 @@
 
         <!-- ML Model Tab -->
         <div class="tab-content" id="ml-tab">
+            <h2 class="section-title">🌊 Live Prediction Wave</h2>
+            <div style="background: rgba(0,0,0,0.3); border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+                <canvas id="ml-wave-canvas" width="800" height="200" style="width: 100%; height: 200px;"></canvas>
+                <div id="ml-wave-legend" style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">
+                    <span style="color: #10b981;">● Normal</span>
+                    <span style="color: #f59e0b; margin-left: 16px;">● Suspicious</span>
+                    <span style="color: #ef4444; margin-left: 16px;">● Mining</span>
+                    <span style="margin-left: 24px;">Real-time LSTM confidence</span>
+                </div>
+            </div>
             <h2 class="section-title">ML Classification History</h2>
             <div id="ml-classifications"></div>
         </div>
@@ -787,6 +797,7 @@
             if (tabName === 'requests') {
                 updateMCPRequests();
             } else if (tabName === 'ml') {
+                drawMLWave();  // Draw live wave first
                 updateMLClassifications();
             } else if (tabName === 'llm') {
                 updateLLMReviews();
@@ -1002,6 +1013,7 @@
                 }
                 const mlTab = document.getElementById('ml-tab');
                 if (mlTab && mlTab.classList.contains('active')) {
+                    drawMLWave();  // Redraw wave in real-time
                     updateMLClassifications();
                 }
                 const llmTab = document.getElementById('llm-tab');
@@ -1018,6 +1030,315 @@
             }
         };
 
+        // Global state for wave graph
+        let waveData = null;
+        let hoveredPoint = null;
+        
+        // Draw live ML prediction wave graph
+        async function drawMLWave() {
+            const canvas = document.getElementById('ml-wave-canvas');
+            if (!canvas || !canvas.getContext) return;
+            
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            
+            try {
+                const resp = await fetch('/api/ml/timeseries');
+                if (!resp.ok) return;
+                
+                const data = await resp.json();
+                const timeseries = data.timeseries || [];
+                
+                // Clear canvas
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(0, 0, width, height);
+                
+                if (timeseries.length === 0) {
+                    ctx.fillStyle = '#64748b';
+                    ctx.font = '14px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Waiting for ML predictions...', width/2, height/2);
+                    waveData = null;
+                    return;
+                }
+                
+                // Draw the most recent time series
+                const series = timeseries[timeseries.length - 1];
+                const timestamps = series.timestamps || [];
+                const confidences = series.confidences || [];
+                const predictions = series.predictions || [];
+                const features_history = series.features_history || [];
+                
+                if (timestamps.length < 1) return;
+                
+                // Store data for hover detection
+                waveData = {
+                    timestamps,
+                    confidences,
+                    predictions,
+                    features: features_history,
+                    points: []
+                };
+                
+                // Calculate time range for proper spacing
+                const minTime = Math.min(...timestamps);
+                const maxTime = Math.max(...timestamps);
+                const timeRange = maxTime - minTime;
+                
+                // Use fixed scale: 10 seconds = full width, or actual time range if larger
+                const displayTimeRange = Math.max(timeRange, 10);
+                const padding = 40; // Leave space for labels
+                const graphWidth = width - padding * 2;
+                const graphHeight = height - 30;
+                
+                // Draw grid and y-axis labels
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 1;
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'right';
+                for (let i = 0; i <= 4; i++) {
+                    const y = (graphHeight / 4) * i;
+                    const conf = 100 - (i * 25);
+                    
+                    // Grid line
+                    ctx.beginPath();
+                    ctx.moveTo(padding, y);
+                    ctx.lineTo(width - padding, y);
+                    ctx.stroke();
+                    
+                    // Y-axis label
+                    ctx.fillText(`${conf}%`, padding - 8, y + 3);
+                }
+                
+                // Draw confidence thresholds
+                ctx.strokeStyle = '#7f1d1d';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                const threshold65 = (height - 30) * (1 - 0.65);
+                ctx.beginPath();
+                ctx.moveTo(padding, threshold65);
+                ctx.lineTo(width - padding, threshold65);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                
+                // Draw threshold label
+                ctx.fillStyle = '#7f1d1d';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('65%', padding - 5, threshold65 + 3);
+                
+                // Draw time axis labels
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'center';
+                const numLabels = 5;
+                for (let i = 0; i <= numLabels; i++) {
+                    const t = minTime + (displayTimeRange * i / numLabels);
+                    const x = padding + (graphWidth * i / numLabels);
+                    const date = new Date(t * 1000);
+                    const timeStr = `${String(date.getSeconds()).padStart(2, '0')}.${String(date.getMilliseconds()).padStart(3, '0').slice(0, 1)}s`;
+                    ctx.fillText(timeStr, x, height - 5);
+                }
+                
+                // Draw wave
+                ctx.lineWidth = 3;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                
+                for (let i = 0; i < timestamps.length - 1; i++) {
+                    // Map time to x position
+                    const x1 = padding + ((timestamps[i] - minTime) / displayTimeRange) * graphWidth;
+                    const y1 = (height - 30) * (1 - confidences[i]);
+                    const x2 = padding + ((timestamps[i + 1] - minTime) / displayTimeRange) * graphWidth;
+                    const y2 = (height - 30) * (1 - confidences[i + 1]);
+                    
+                    // Store point for hover detection
+                    waveData.points.push({x: x1, y: y1, index: i});
+                    
+                    // Color based on prediction
+                    const pred = predictions[i];
+                    let color;
+                    if (pred === 'mining') {
+                        color = '#ef4444'; // Red
+                    } else if (pred === 'suspicious') {
+                        color = '#f59e0b'; // Orange
+                    } else {
+                        color = '#10b981'; // Green
+                    }
+                    ctx.strokeStyle = color;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                    ctx.stroke();
+                    
+                    // Draw point
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    const radius = (hoveredPoint === i) ? 6 : 4;
+                    ctx.arc(x1, y1, radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Highlight hovered point
+                    if (hoveredPoint === i) {
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(x1, y1, 10, 0, Math.PI * 2);
+                        ctx.stroke();
+                        ctx.lineWidth = 3;
+                    }
+                }
+                
+                // Draw last point
+                if (timestamps.length > 0) {
+                    const lastIdx = timestamps.length - 1;
+                    const lastX = padding + ((timestamps[lastIdx] - minTime) / displayTimeRange) * graphWidth;
+                    const lastY = (height - 30) * (1 - confidences[lastIdx]);
+                    const lastPred = predictions[lastIdx];
+                    
+                    // Store last point
+                    waveData.points.push({x: lastX, y: lastY, index: lastIdx});
+                    
+                    let color;
+                    if (lastPred === 'mining') {
+                        color = '#ef4444';
+                    } else if (lastPred === 'suspicious') {
+                        color = '#f59e0b';
+                    } else {
+                        color = '#10b981';
+                    }
+                    ctx.fillStyle = color;
+                    
+                    ctx.beginPath();
+                    const lastRadius = (hoveredPoint === lastIdx) ? 8 : 6;
+                    ctx.arc(lastX, lastY, lastRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Draw pulse effect for latest
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(lastX, lastY, 10, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                
+                // Show final prediction in top-left
+                if (timestamps.length > 0) {
+                    const finalPred = predictions[predictions.length - 1];
+                    const finalConf = (confidences[confidences.length - 1] * 100).toFixed(1);
+                    
+                    let predColor;
+                    if (finalPred === 'mining') {
+                        predColor = '#ef4444';
+                    } else if (finalPred === 'suspicious') {
+                        predColor = '#f59e0b';
+                    } else {
+                        predColor = '#10b981';
+                    }
+                    
+                    ctx.fillStyle = predColor;
+                    ctx.font = 'bold 14px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`Latest: ${finalPred.toUpperCase()} (${finalConf}%)`, padding, 15);
+                    
+                    ctx.fillStyle = '#94a3b8';
+                    ctx.font = '11px monospace';
+                    ctx.fillText(`${timestamps.length} samples over ${timeRange.toFixed(1)}s`, padding, 30);
+                }
+                
+                // Draw tooltip if hovering
+                if (hoveredPoint !== null && hoveredPoint < features_history.length) {
+                    const point = waveData.points[hoveredPoint];
+                    const features = features_history[hoveredPoint];
+                    const pred = predictions[hoveredPoint];
+                    const conf = confidences[hoveredPoint];
+                    
+                    // Tooltip background
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+                    ctx.strokeStyle = '#60a5fa';
+                    ctx.lineWidth = 2;
+                    
+                    const tooltipX = point.x > width/2 ? point.x - 220 : point.x + 20;
+                    const tooltipY = Math.min(point.y, height - 170);
+                    
+                    ctx.fillRect(tooltipX, tooltipY, 200, 160);
+                    ctx.strokeRect(tooltipX, tooltipY, 200, 160);
+                    
+                    // Tooltip content
+                    ctx.fillStyle = '#f1f5f9';
+                    ctx.font = 'bold 12px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`${pred.toUpperCase()} (${(conf*100).toFixed(1)}%)`, tooltipX + 10, tooltipY + 20);
+                    
+                    ctx.font = '11px monospace';
+                    ctx.fillStyle = '#94a3b8';
+                    let y = tooltipY + 40;
+                    ctx.fillText(`CPU: ${features.cpu_percent}%`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Mem: ${features.memory_mb} MB (${features.memory_percent}%)`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Net RX: ${features.network_rx_rate} KB/s`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Net TX: ${features.network_tx_rate} KB/s`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Block R: ${features.block_read_mb} MB`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Block W: ${features.block_write_mb} MB`, tooltipX + 10, y);
+                    y += 15;
+                    ctx.fillText(`Sequence: ${features.sequence_length}`, tooltipX + 10, y);
+                }
+                
+            } catch (e) {
+                console.error('Error drawing ML wave:', e);
+            }
+        }
+        
+        // Setup mouse event handlers for wave canvas
+        (function setupWaveInteraction() {
+            const canvas = document.getElementById('ml-wave-canvas');
+            if (!canvas) return;
+            
+            canvas.addEventListener('mousemove', (e) => {
+                if (!waveData || !waveData.points) return;
+                
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                const mouseX = (e.clientX - rect.left) * scaleX;
+                const mouseY = (e.clientY - rect.top) * scaleY;
+                
+                // Find closest point
+                let closestIdx = null;
+                let closestDist = Infinity;
+                
+                waveData.points.forEach((point, idx) => {
+                    const dist = Math.sqrt(Math.pow(point.x - mouseX, 2) + Math.pow(point.y - mouseY, 2));
+                    if (dist < 20 && dist < closestDist) {  // 20px hover radius
+                        closestDist = dist;
+                        closestIdx = point.index;
+                    }
+                });
+                
+                if (closestIdx !== hoveredPoint) {
+                    hoveredPoint = closestIdx;
+                    drawMLWave();  // Redraw with hover state
+                }
+                
+                canvas.style.cursor = closestIdx !== null ? 'pointer' : 'default';
+            });
+            
+            canvas.addEventListener('mouseleave', () => {
+                if (hoveredPoint !== null) {
+                    hoveredPoint = null;
+                    drawMLWave();
+                }
+                canvas.style.cursor = 'default';
+            });
+        })();
+        
         // Ensure functions are defined at top-level scope
         // Update ML classifications (ALL predictions, not just alerts)
         async function updateMLClassifications() {

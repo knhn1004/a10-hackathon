@@ -619,13 +619,27 @@ async def get_ml_predictions(limit: int = 100):
     """Return ALL recent ML predictions (not just alerts above threshold)."""
     if not monitor:
         raise HTTPException(status_code=503, detail="Monitor not initialized")
-    
+
     try:
         predictions = monitor.get_ml_predictions(limit=limit)
         return {"predictions": predictions, "count": len(predictions)}
     except Exception as e:
         logger.error(f"Error reading ML predictions: {e}")
         return {"predictions": [], "count": 0}
+
+
+@app.get("/api/ml/timeseries")
+async def get_ml_timeseries(container_id: str = None):
+    """Return time series of predictions for wave graph visualization."""
+    if not monitor:
+        raise HTTPException(status_code=503, detail="Monitor not initialized")
+
+    try:
+        timeseries = monitor.get_ml_time_series(container_id=container_id)
+        return {"timeseries": timeseries, "count": len(timeseries)}
+    except Exception as e:
+        logger.error(f"Error reading ML time series: {e}")
+        return {"timeseries": [], "count": 0}
 
 
 def run_dashboard(host: str = "0.0.0.0", port: int = 8080):
