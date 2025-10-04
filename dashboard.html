@@ -364,6 +364,68 @@
             margin: 20px 0;
         }
 
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 16px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2px solid var(--primary-color);
+        }
+
+        .user-details {
+            text-align: left;
+        }
+
+        .user-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .user-email {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .login-btn, .logout-btn {
+            padding: 10px 20px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s ease;
+        }
+
+        .login-btn:hover, .logout-btn:hover {
+            background: #2563eb;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+        }
+
+        .logout-btn {
+            background: var(--danger-color);
+            padding: 8px 16px;
+            font-size: 0.85rem;
+        }
+
+        .logout-btn:hover {
+            background: #dc2626;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        }
+
         .tabs {
             display: flex;
             gap: 10px;
@@ -475,11 +537,18 @@
 
 <body>
     <div class="header">
-        <h1>🐳 Code Sandbox Observability</h1>
-        <p class="subtitle">
-            <span class="refresh-indicator"></span>
-            Real-time monitoring • Updated every 2 seconds
-        </p>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h1>🐳 Code Sandbox Observability</h1>
+                <p class="subtitle">
+                    <span class="refresh-indicator"></span>
+                    Real-time monitoring • Updated every 2 seconds
+                </p>
+            </div>
+            <div id="auth-section" style="text-align: right;">
+                <!-- Auth UI will be injected here -->
+            </div>
+        </div>
     </div>
 
     <div id="error-container"></div>
@@ -531,6 +600,7 @@
             <button class="tab" onclick="switchTab('requests')">MCP Requests</button>
             <button class="tab" onclick="switchTab('ml')">ML Model</button>
             <button class="tab" onclick="switchTab('llm')">LLM Reviews</button>
+            <button class="tab" onclick="switchTab('tokens')">API Tokens</button>
     </div>
 
     <!-- Tab Contents -->
@@ -569,6 +639,22 @@
             <div id="llm-reviews-list"></div>
         </div>
 
+        <!-- API Tokens Tab -->
+        <div class="tab-content" id="tokens-tab">
+            <h2 class="section-title">🔑 API Tokens</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                Generate personal API tokens for MCP server authentication. Each token is tied to your GitHub account.
+            </p>
+            
+            <div style="margin-bottom: 30px;">
+                <button class="btn" style="background: var(--primary-color); color: white; padding: 12px 24px;" onclick="showGenerateTokenModal()">
+                    ➕ Generate New Token
+                </button>
+            </div>
+
+            <div id="tokens-list"></div>
+        </div>
+
         
     </div>
 
@@ -583,11 +669,36 @@
         </div>
     </div>
 
+    <!-- Modal for generating tokens -->
+    <div id="generate-token-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Generate API Token</h2>
+                <button class="close-btn" onclick="closeGenerateTokenModal()">&times;</button>
+            </div>
+            <div style="margin: 20px 0;">
+                <label style="display: block; margin-bottom: 8px; color: var(--text-secondary);">Token Name</label>
+                <input type="text" id="token-name" placeholder="e.g., My MacBook Claude" 
+                       style="width: 100%; padding: 10px; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary);">
+                
+                <label style="display: block; margin: 16px 0 8px 0; color: var(--text-secondary);">Description (optional)</label>
+                <input type="text" id="token-description" placeholder="e.g., Local development environment" 
+                       style="width: 100%; padding: 10px; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary);">
+                
+                <button class="btn" onclick="generateToken()" style="margin-top: 20px; background: var(--success-color); color: white; padding: 12px 24px;">
+                    Generate Token
+                </button>
+            </div>
+            <div id="token-result" style="display: none; margin-top: 20px;"></div>
+        </div>
+    </div>
+
     <script>
         // Global state
         let cpuChart = null;
         let memoryChart = null;
         let updateInterval = null;
+        let currentUser = null;
 
         // Initialize charts
         function initCharts() {
@@ -801,6 +912,8 @@
                 updateMLClassifications();
             } else if (tabName === 'llm') {
                 updateLLMReviews();
+            } else if (tabName === 'tokens') {
+                updateTokensList();
             }
         }
 
@@ -997,8 +1110,239 @@
             }, 3000);
         }
 
+        // Check authentication status
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/me');
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    
+                    if (!data.auth_enabled) {
+                        // Auth is disabled, show anonymous access
+                        showAnonymousAccess();
+                        return true;
+                    }
+                    
+                    if (data.authenticated && data.user) {
+                        currentUser = data.user;
+                        showUserInfo(data.user);
+                        return true;
+                    }
+                }
+                
+                // Not authenticated
+                showLoginButton();
+                return false;
+            } catch (error) {
+                console.error('Auth check failed:', error);
+                showLoginButton();
+                return false;
+            }
+        }
+
+        function showLoginButton() {
+            const authSection = document.getElementById('auth-section');
+            authSection.innerHTML = `
+                <a href="/auth/github" class="login-btn">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="vertical-align: middle; margin-right: 6px;">
+                        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                    </svg>
+                    Sign in with GitHub
+                </a>
+            `;
+        }
+
+        function showAnonymousAccess() {
+            const authSection = document.getElementById('auth-section');
+            authSection.innerHTML = `
+                <div style="color: var(--text-secondary); font-size: 0.85rem;">
+                    🔓 Anonymous Access
+                </div>
+            `;
+        }
+
+        function showUserInfo(user) {
+            const authSection = document.getElementById('auth-section');
+            const avatar = user.avatar_url ? 
+                `<img src="${user.avatar_url}" alt="${user.login}" class="user-avatar">` : 
+                `<div class="user-avatar" style="background: var(--primary-color); display: flex; align-items: center; justify-content: center; font-weight: bold;">${user.login[0].toUpperCase()}</div>`;
+            
+            authSection.innerHTML = `
+                <div class="user-info">
+                    ${avatar}
+                    <div class="user-details">
+                        <div class="user-name">${user.name || user.login}</div>
+                        <div class="user-email">${user.email || '@' + user.login}</div>
+                    </div>
+                    <a href="/logout" class="logout-btn">Logout</a>
+                </div>
+            `;
+        }
+
+        // Token management functions
+        function showGenerateTokenModal() {
+            document.getElementById('generate-token-modal').style.display = 'block';
+            document.getElementById('token-result').style.display = 'none';
+            document.getElementById('token-name').value = '';
+            document.getElementById('token-description').value = '';
+        }
+
+        function closeGenerateTokenModal() {
+            document.getElementById('generate-token-modal').style.display = 'none';
+        }
+
+        async function generateToken() {
+            const name = document.getElementById('token-name').value;
+            const description = document.getElementById('token-description').value;
+
+            if (!name) {
+                alert('Please enter a token name');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/tokens/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        name: name,
+                        description: description || ""
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to generate token');
+                }
+
+                const data = await response.json();
+
+                // Show the token (only time user will see it!)
+                document.getElementById('token-result').style.display = 'block';
+                document.getElementById('token-result').innerHTML = `
+                    <div class="success-message">
+                        <h3 style="margin-top: 0;">✅ Token Generated!</h3>
+                        <p><strong>⚠️ Copy this token now - you won't see it again!</strong></p>
+                        <div style="background: var(--bg-dark); padding: 15px; border-radius: 8px; margin: 15px 0; font-family: monospace; word-break: break-all;">
+                            ${data.token}
+                        </div>
+                        <button class="btn" onclick="copyToken('${data.token}')" style="background: var(--primary-color); color: white;">
+                            📋 Copy Token
+                        </button>
+                        <div style="margin-top: 20px; padding: 15px; background: rgba(59, 130, 246, 0.1); border-radius: 8px;">
+                            <h4 style="margin-top: 0; color: var(--primary-color);">How to use this token:</h4>
+                            <p style="margin: 8px 0;">Add to your Claude Desktop config:</p>
+                            <pre style="background: var(--bg-dark); padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.85rem;">
+"env": {
+  "MCP_API_TOKEN": "${data.token}",
+  "REQUIRE_TOKEN": "true",
+  "DASHBOARD_URL": "${window.location.origin}"
+}</pre>
+                        </div>
+                    </div>
+                `;
+
+                // Refresh token list
+                setTimeout(() => {
+                    updateTokensList();
+                }, 1000);
+
+            } catch (error) {
+                alert('Failed to generate token: ' + error.message);
+            }
+        }
+
+        function copyToken(token) {
+            navigator.clipboard.writeText(token).then(() => {
+                alert('✅ Token copied to clipboard!');
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+
+        async function updateTokensList() {
+            try {
+                const response = await fetch('/api/tokens');
+                if (!response.ok) return;
+
+                const data = await response.json();
+                const container = document.getElementById('tokens-list');
+
+                if (!data.tokens || data.tokens.length === 0) {
+                    container.innerHTML = '<div class="loading">No API tokens yet. Generate one above to get started!</div>';
+                    return;
+                }
+
+                container.innerHTML = '';
+
+                data.tokens.forEach(token => {
+                    const item = document.createElement('div');
+                    item.className = 'request-item';
+
+                    const createdDate = new Date(token.created_at * 1000).toLocaleString();
+                    const lastUsed = token.last_used ? new Date(token.last_used * 1000).toLocaleString() : 'Never';
+                    const tokenId = token.token_hash; // Using token_hash as ID
+
+                    item.innerHTML = `
+                        <div class="request-header">
+                            <div>
+                                <div class="request-tool">${token.name}</div>
+                                <div class="request-time">
+                                    Created: ${createdDate} • Last used: ${lastUsed} • Usage: ${token.usage_count} times
+                                </div>
+                            </div>
+                            <div>
+                                <span class="request-status ${token.active ? 'status-success' : 'status-error'}">
+                                    ${token.active ? 'Active' : 'Revoked'}
+                                </span>
+                                ${token.active ? `
+                                    <button class="btn btn-danger" onclick="revokeToken('${tokenId}')" style="margin-left: 10px; padding: 6px 12px; font-size: 0.85rem;">
+                                        Revoke
+                                    </button>
+                                ` : ''}
+                            </div>
+                        </div>
+                        ${token.description ? `<div class="request-preview">${token.description}</div>` : ''}
+                    `;
+
+                    container.appendChild(item);
+                });
+
+            } catch (error) {
+                console.error('Failed to load tokens:', error);
+            }
+        }
+
+        async function revokeToken(tokenHash) {
+            if (!confirm('Are you sure you want to revoke this token? This action cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/tokens/${tokenHash}/revoke`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to revoke token');
+                }
+
+                alert('✅ Token revoked successfully');
+                updateTokensList();
+
+            } catch (error) {
+                alert('Failed to revoke token: ' + error.message);
+            }
+        }
+
         // Initialize
-        window.onload = () => {
+        window.onload = async () => {
+            // Check authentication first
+            await checkAuth();
+
             initCharts();
             updateDashboard();
 

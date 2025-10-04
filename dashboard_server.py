@@ -16,16 +16,26 @@ import time
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from pydantic import BaseModel
 import uvicorn
 import httpx
 import os
 import json
 
+from authlib.integrations.starlette_client import OAuth, OAuthError
+from dotenv import load_dotenv
+
 from monitor import get_monitor, ContainerMonitor
+from database.prisma_client import get_prisma
+import token_manager_prisma as token_manager
+
+# Load environment variables from .env file
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard")
@@ -145,6 +155,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add session middleware for OAuth
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "change-me-in-production-please")
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
 # Enable CORS for development
 app.add_middleware(
     CORSMiddleware,
@@ -153,6 +167,306 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Configure OAuth
+oauth = OAuth()
+
+# GitHub OAuth configuration
+GITHUB_CLIENT_ID = os.environ.get("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET")
+ENABLE_AUTH = os.environ.get("ENABLE_AUTH", "false").lower() == "true"
+
+if ENABLE_AUTH and GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
+    oauth.register(
+        name='github',
+        client_id=GITHUB_CLIENT_ID,
+        client_secret=GITHUB_CLIENT_SECRET,
+        authorize_url='https://github.com/login/oauth/authorize',
+        authorize_params={'scope': 'user:email'},
+        access_token_url='https://github.com/login/oauth/access_token',
+        access_token_params=None,
+        api_base_url='https://api.github.com/',
+        client_kwargs={'scope': 'user:email'},
+    )
+    logger.info("🔐 GitHub OAuth enabled")
+else:
+    if ENABLE_AUTH:
+        logger.warning("⚠️  AUTH enabled but GitHub credentials missing - auth will not work!")
+    else:
+        logger.info("🔓 Authentication disabled (set ENABLE_AUTH=true to enable)")
+
+
+# Authentication dependency
+async def get_current_user(request: Request):
+    """Get current authenticated user from session."""
+    if not ENABLE_AUTH:
+        # Auth disabled - allow all requests
+        return {"login": "development-user", "email": "dev@localhost"}
+    
+    user = request.session.get('user')
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+# Public routes (no auth required)
+# When ENABLE_AUTH is true, only protect token management endpoints
+# All monitoring/observability endpoints remain public
+PUBLIC_ROUTES = [
+    "/", 
+    "/auth/github", 
+    "/auth/callback", 
+    "/health", 
+    "/api/health", 
+    "/api/auth/me",
+    "/api/overview",
+    "/api/system",
+    "/api/containers",
+    "/api/requests/history",
+    "/api/ml/",
+    "/api/llm/",
+    "/api/crashes",
+    "/api/alerts",
+]
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Require authentication only for token management endpoints.
+    
+    Monitoring and observability endpoints are public.
+    Only token generation/management requires authentication.
+    """
+    # Skip auth if disabled
+    if not ENABLE_AUTH:
+        return await call_next(request)
+    
+    # Check if route is public
+    for public_route in PUBLIC_ROUTES:
+        if request.url.path.startswith(public_route):
+            return await call_next(request)
+    
+    # Only protect /api/tokens/* endpoints (require auth to manage tokens)
+    if request.url.path.startswith("/api/tokens"):
+        try:
+            user_in_session = 'user' in request.session
+        except (AssertionError, RuntimeError):
+            user_in_session = False
+        
+        if not user_in_session:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Not authenticated. Please login to manage API tokens."}
+            )
+    
+    return await call_next(request)
+
+
+# OAuth routes (no separate login page - button is on dashboard)
+
+@app.get("/login")
+async def login_redirect():
+    """Redirect /login to dashboard (for backward compatibility)."""
+    return RedirectResponse(url="/")
+
+
+@app.get("/auth/github")
+async def auth_github(request: Request):
+    """Initiate GitHub OAuth flow."""
+    if not ENABLE_AUTH:
+        return RedirectResponse(url="/")
+    
+    redirect_uri = request.url_for('auth_callback')
+    return await oauth.github.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request):
+    """Handle GitHub OAuth callback.
+    
+    This must match your GitHub OAuth App settings:
+    - For local dev: http://localhost:8080/auth/callback
+    - For production: https://your-app.fly.dev/auth/callback
+    """
+    if not ENABLE_AUTH:
+        return RedirectResponse(url="/")
+    
+    try:
+        token = await oauth.github.authorize_access_token(request)
+        resp = await oauth.github.get('user', token=token)
+        user_info = resp.json()
+        
+        # Store user info in session
+        request.session['user'] = {
+            'login': user_info.get('login'),
+            'name': user_info.get('name'),
+            'email': user_info.get('email'),
+            'avatar_url': user_info.get('avatar_url'),
+        }
+        
+        logger.info(f"✅ User {user_info.get('login')} authenticated successfully")
+        
+        return RedirectResponse(url='/')
+    except OAuthError as e:
+        logger.error(f"OAuth error: {e}")
+        return HTMLResponse(
+            content=f"<h1>Authentication failed</h1><p>{str(e)}</p><a href='/login'>Try again</a>",
+            status_code=400
+        )
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Logout user and redirect to dashboard (which will show login button)."""
+    request.session.clear()
+    return RedirectResponse(url='/')
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(request: Request):
+    """Get current authenticated user info.
+    
+    Returns user info from session or 401 if not authenticated.
+    """
+    if not ENABLE_AUTH:
+        return {
+            "authenticated": False,
+            "auth_enabled": False,
+            "user": None
+        }
+    
+    user = request.session.get('user')
+    if user:
+        return {
+            "authenticated": True,
+            "auth_enabled": True,
+            "user": user
+        }
+    else:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+# =============================================================================
+# API Token Management Endpoints
+# =============================================================================
+
+class TokenGenerateRequest(BaseModel):
+    name: str
+    description: str = ""
+
+@app.post("/api/tokens/generate")
+async def generate_token_endpoint(
+    token_request: TokenGenerateRequest,
+    request: Request,
+    user: dict = Depends(get_current_user)
+):
+    """Generate a new API token for MCP authentication.
+    
+    Args:
+        token_request: Token name and description
+        user: Current authenticated user
+    """
+    user_id = user.get("login")
+    github_id = user.get("id", user_id)  # Use GitHub numeric ID if available
+    
+    # Generate token using Prisma
+    token = await token_manager.generate_token(
+        str(github_id), 
+        user_id, 
+        token_request.name, 
+        token_request.description
+    )
+    
+    logger.info(f"🔑 Generated API token '{token_request.name}' for user {user_id}")
+    
+    return {
+        "success": True,
+        "token": token,
+        "message": "Token generated successfully. Copy it now - you won't see it again!",
+        "usage_instructions": {
+            "mcp_server": "Set environment variable: MCP_API_TOKEN=<token>",
+            "command_line": f"export MCP_API_TOKEN={token}"
+        }
+    }
+
+
+@app.get("/api/tokens")
+async def list_tokens(request: Request, user: dict = Depends(get_current_user)):
+    """List all API tokens for current user."""
+    github_id = str(user.get("id", user.get("login")))
+    
+    tokens = await token_manager.list_tokens(github_id)
+    
+    return {
+        "tokens": tokens,
+        "count": len(tokens)
+    }
+
+
+@app.post("/api/tokens/{token_id}/revoke")
+async def revoke_token_endpoint(
+    request: Request,
+    token_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Revoke an API token."""
+    github_id = str(user.get("id", user.get("login")))
+    
+    success = await token_manager.revoke_token(github_id, token_id)
+    
+    if success:
+        logger.info(f"🔒 Revoked API token for user {user.get('login')}")
+        return {"success": True, "message": "Token revoked successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Token not found or unauthorized")
+
+
+@app.delete("/api/tokens/{token_id}")
+async def delete_token_endpoint(
+    request: Request,
+    token_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Permanently delete an API token."""
+    github_id = str(user.get("id", user.get("login")))
+    
+    success = await token_manager.delete_token(github_id, token_id)
+    
+    if success:
+        logger.info(f"🗑️  Deleted API token for user {user.get('login')}")
+        return {"success": True, "message": "Token deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Token not found or unauthorized")
+
+
+@app.post("/api/tokens/validate")
+async def validate_token_endpoint(token: str):
+    """Validate an API token (used by MCP server).
+    
+    This is a PUBLIC endpoint called by users' local MCP servers.
+    Each user's MCP server sends their personal token for validation.
+    
+    Args:
+        token: The user's personal API token (from their local environment)
+    """
+    token_data = await token_manager.validate_token(token)
+    
+    if token_data:
+        return {
+            "valid": True,
+            "user_id": token_data.get("user_id"),
+            "token_name": token_data.get("name"),
+        }
+    else:
+        return {
+            "valid": False,
+            "error": "Invalid or revoked token"
+        }
 
 
 # No middleware - we'll read MCP requests from file instead

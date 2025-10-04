@@ -1,11 +1,64 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
-logs/
-*.log
-llm_reviews.json
-mcp_requests.json
+build/
+venv/
+.venv/
+*.egg-info/
+dist/
+.pytest_cache/
 
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+*.env
+.env.backup
+.env.bak
+
+# API Tokens & Sensitive Data
+data/api_tokens.json
+mcp_requests.json
+llm_reviews.json
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+backup/
+*.backup
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Prisma
+.prisma/
+prisma/migrations/
+
+# Node (for Prisma CLI)
+node_modules/
+package-lock.json
+
+# Models (ML)
 models/

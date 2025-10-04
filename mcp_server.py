@@ -31,6 +31,10 @@ import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging FIRST before using logger
 logging.basicConfig(
@@ -66,6 +70,14 @@ IDLE_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "300"))  # 5 minutes
 MAX_SANDBOXES = int(os.getenv("MAX_SANDBOXES", "10"))
 CHECK_INTERVAL = 60
 
+# API Token configuration (per-user, from local environment)
+MCP_API_TOKEN = os.getenv("MCP_API_TOKEN")  # User's personal token
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8080")
+REQUIRE_TOKEN = os.getenv("REQUIRE_TOKEN", "false").lower() == "true"
+
+# Note: MCP_API_TOKEN is set by each user locally, not on the server!
+# Users generate tokens from the dashboard and configure them locally.
+
 # URL fetching configuration
 MAX_CODE_SIZE = 1024 * 1024  # 1MB max code size
 URL_FETCH_TIMEOUT = 10.0  # 10 second timeout for fetching URLs
@@ -92,6 +104,32 @@ HISTORY_FILE = os.path.join(
 LLM_REVIEW_FILE = os.path.join(BASE_DIR, "llm_reviews.json")
 
 llm_review_history: list = []  # Store recent LLM code reviews
+
+
+async def validate_api_token(token: str) -> Dict[str, Any]:
+    """Validate API token with dashboard server.
+    
+    Args:
+        token: The API token to validate
+        
+    Returns:
+        Dict with validation result and user info
+    """
+    try:
+        response = await http_client.post(
+            f"{DASHBOARD_URL}/api/tokens/validate",
+            params={"token": token},
+            timeout=5.0
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data
+        else:
+            return {"valid": False, "error": "Token validation failed"}
+    except Exception as e:
+        logger.error(f"Failed to validate token: {e}")
+        return {"valid": False, "error": str(e)}
 
 
 # Load existing history on startup
@@ -1383,6 +1421,31 @@ async def main():
     )
     logger.info(f"  📝 Request History: {os.path.abspath(HISTORY_FILE)}")
     logger.info(f"  📂 Working Directory: {os.getcwd()}")
+    
+    # API Token authentication
+    if REQUIRE_TOKEN:
+        logger.info(f"  🔐 API Token: {'Configured' if MCP_API_TOKEN else '❌ MISSING'}")
+        logger.info(f"  🌐 Dashboard URL: {DASHBOARD_URL}")
+        
+        if not MCP_API_TOKEN:
+            logger.error("❌ MCP_API_TOKEN environment variable is required when REQUIRE_TOKEN=true")
+            logger.error("   Generate a token from the dashboard: /api/tokens/generate")
+            return
+        
+        # Validate token on startup
+        logger.info("🔑 Validating API token...")
+        validation = await validate_api_token(MCP_API_TOKEN)
+        
+        if not validation.get("valid"):
+            logger.error(f"❌ Invalid API token: {validation.get('error', 'Unknown error')}")
+            logger.error("   Generate a new token from the dashboard")
+            return
+        
+        logger.info(f"✅ API token validated successfully")
+        logger.info(f"   User: {validation.get('user_id')}")
+        logger.info(f"   Token: {validation.get('token_name')}")
+    else:
+        logger.info(f"  🔓 API Token: Disabled (set REQUIRE_TOKEN=true to enable)")
 
     if CODE_FILTER_ENABLED:
         logger.info(

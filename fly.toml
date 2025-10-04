@@ -1,0 +1,62 @@
+# Fly.io configuration for A10 Hackathon Dashboard
+app = "a10-hackathon-dashboard"
+primary_region = "sjc"  # San Jose - change to your preferred region
+
+[build]
+  dockerfile = "Dockerfile.dashboard"
+
+[env]
+  PORT = "8080"
+  # Fly.io provides access to the Docker socket via /var/run/docker.sock
+  DOCKER_HOST = "unix:///var/run/docker.sock"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "5s"
+    method = "GET"
+    path = "/api/health"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+# Mount Docker socket for container monitoring
+[[mounts]]
+  source = "docker_socket"
+  destination = "/var/run/docker.sock"
+  initial_size = "1gb"
+
+# Persistent volume for logs and data
+[[mounts]]
+  source = "dashboard_data"
+  destination = "/app/data"
+  initial_size = "1gb"
+
+[metrics]
+  port = 9091
+  path = "/metrics"
+

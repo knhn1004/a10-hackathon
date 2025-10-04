@@ -1,0 +1,177 @@
+// Prisma Client Python Schema
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+// Users from GitHub OAuth
+model User {
+  id        String   @id @default(uuid())
+  githubId  String   @unique
+  username  String   @unique
+  email     String?
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  apiTokens    ApiToken[]
+  mcpRequests  McpRequest[]
+  llmReviews   LlmReview[]
+  mlPredictions MlPrediction[]
+
+  @@map("users")
+}
+
+// API Tokens for MCP authentication
+model ApiToken {
+  id          String   @id @default(uuid())
+  userId      String
+  tokenHash   String   @unique // SHA-256 hash of actual token
+  name        String
+  description String?
+  active      Boolean  @default(true)
+  usageCount  Int      @default(0)
+  lastUsedAt  DateTime?
+  createdAt   DateTime @default(now())
+  revokedAt   DateTime?
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("api_tokens")
+}
+
+// MCP Request History
+model McpRequest {
+  id            String   @id @default(uuid())
+  userId        String?
+  tool          String
+  status        String
+  sandboxId     String?
+  codeLength    Int?
+  url           String?
+  resultPreview String?  @db.Text
+  errorMessage  String?  @db.Text
+  executionTime Float?   // seconds
+  createdAt     DateTime @default(now())
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([sandboxId])
+  @@index([createdAt])
+  @@map("mcp_requests")
+}
+
+// LLM Code Reviews
+model LlmReview {
+  id              String   @id @default(uuid())
+  userId          String?
+  sandboxId       String
+  source          String   // "execute_python" or "execute_from_url"
+  code            String   @db.Text
+  codeLength      Int
+  decision        String   // "accept" or "reject"
+  confidence      Float
+  threatsDetected String[] // Array of detected threats
+  reasoning       String?  @db.Text
+  reviewTime      Float    // seconds
+  modelUsed       String   // e.g., "llama3.1:latest"
+  createdAt       DateTime @default(now())
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([sandboxId])
+  @@index([decision])
+  @@index([createdAt])
+  @@map("llm_reviews")
+}
+
+// ML Mining Predictions
+model MlPrediction {
+  id            String   @id @default(uuid())
+  userId        String?
+  containerId   String
+  containerName String
+  prediction    String   // "normal", "suspicious", "mining"
+  confidence    Float
+  samples       Int
+  duration      Float    // seconds
+  features      Json     // All 19 features as JSON
+  createdAt     DateTime @default(now())
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([containerId])
+  @@index([prediction])
+  @@index([createdAt])
+  @@map("ml_predictions")
+}
+
+// Container Metrics (time-series data)
+model ContainerMetric {
+  id              String   @id @default(uuid())
+  containerId     String
+  containerName   String
+  status          String
+  cpuPercent      Float
+  memoryUsageMb   Float
+  memoryLimitMb   Float
+  memoryPercent   Float
+  networkRxBytes  BigInt
+  networkTxBytes  BigInt
+  blockReadBytes  BigInt
+  blockWriteBytes BigInt
+  createdAt       DateTime @default(now())
+
+  @@index([containerId, createdAt])
+  @@index([createdAt])
+  @@map("container_metrics")
+}
+
+// System Metrics (aggregated)
+model SystemMetric {
+  id               String   @id @default(uuid())
+  totalContainers  Int
+  runningContainers Int
+  totalCpuPercent  Float
+  totalMemoryMb    Float
+  createdAt        DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("system_metrics")
+}
+
+// Container Crashes
+model ContainerCrash {
+  id          String   @id @default(uuid())
+  containerId String
+  containerName String
+  exitCode    Int
+  signal      String?
+  oomKilled   Boolean  @default(false)
+  stdout      String?  @db.Text
+  stderr      String?  @db.Text
+  crashedAt   DateTime @default(now())
+
+  @@index([containerId])
+  @@index([crashedAt])
+  @@map("container_crashes")
+}
+

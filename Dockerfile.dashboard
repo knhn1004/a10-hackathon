@@ -1,0 +1,57 @@
+# Production Dockerfile for Dashboard Server
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI (for container management)
+RUN curl -fsSL https://get.docker.com -o get-docker.sh && \
+    sh get-docker.sh && \
+    rm get-docker.sh
+
+# Copy poetry files
+COPY pyproject.toml poetry.lock* ./
+
+# Install poetry
+RUN pip install --no-cache-dir poetry==1.7.1
+
+# Configure poetry to not create virtual env (we're in a container)
+RUN poetry config virtualenvs.create false
+
+# Install dependencies
+RUN poetry install --no-interaction --no-ansi --no-root --without dev
+
+# Copy application files
+COPY dashboard_server.py .
+COPY dashboard.html .
+COPY monitor.py .
+COPY mcp_server.py .
+COPY sandbox_server.py .
+COPY ml_mining_detector.py .
+COPY ml_temporal_detector.py .
+COPY train_model.py .
+COPY collect_training_data.py .
+COPY code_safety_filter.py .
+
+# Copy models if they exist
+COPY models/ ./models/ 2>/dev/null || :
+
+# Create directories for data
+RUN mkdir -p /app/data /app/logs /app/models
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/api/health || exit 1
+
+# Run dashboard server
+CMD ["python", "dashboard_server.py"]
+
