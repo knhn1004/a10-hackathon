@@ -1644,7 +1644,12 @@ class ContainerMonitor:
                 return
 
             user_id = owner_data.get("user_id")
-            logger.info(f"✅ Found owner for {prediction.container_id[:12]}: {user_id}")
+            mcp_request_id = owner_data.get(
+                "mcp_request_id"
+            )  # Get MCP request ID from container
+            logger.info(
+                f"✅ Found owner for {prediction.container_id[:12]}: {user_id}, request: {mcp_request_id}"
+            )
 
             # Calculate duration from features
             duration = prediction.features.get("execution_duration", 0.0)
@@ -1656,6 +1661,7 @@ class ContainerMonitor:
                 json={
                     "container_id": prediction.container_id,
                     "container_name": prediction.name,
+                    "mcp_request_id": mcp_request_id,  # Link to MCP request
                     "prediction": prediction.prediction,
                     "confidence": prediction.confidence,
                     "samples": prediction.samples,

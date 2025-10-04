@@ -21,6 +21,7 @@ model users {
   updatedAt      DateTime         @default(now())
   api_tokens     api_tokens[]
   mcp_requests   mcp_requests[]
+  containers     containers[]
 
   @@index([githubId])
   @@index([username])
@@ -82,6 +83,7 @@ model containers {
   deletedAt     DateTime?
   
   // Relations
+  users         users             @relation(fields: [userId], references: [id], onDelete: Cascade)
   mcp_requests  mcp_requests?     @relation(fields: [mcpRequestId], references: [id], onDelete: SetNull)
   ml_predictions ml_predictions[]
   crashes       container_crashes[]

@@ -1214,13 +1214,15 @@ async def get_container_owner(container_id: str):
             return {"found": False}
 
         logger.info(
-            f"   ✅ Found owner: {container.users.username} ({container.users.id})"
+            f"   ✅ Found owner: {container.users.username} ({container.users.id}), "
+            f"mcp_request_id: {container.mcpRequestId}"
         )
 
         return {
             "found": True,
             "user_id": container.users.id,
             "username": container.users.username,
+            "mcp_request_id": container.mcpRequestId,  # Include MCP request ID
         }
     except Exception as e:
         logger.error(f"❌ Failed to get container owner: {e}", exc_info=True)
@@ -1369,14 +1371,19 @@ async def log_ml_prediction_endpoint(
             "isFinal": pred_log.is_final,
         }
 
+        logger.info(
+            f"📊 Attempting to save ML prediction: container={pred_log.container_id}, "
+            f"prediction={pred_log.prediction}, is_final={pred_log.is_final}, mcp_request_id={pred_log.mcp_request_id}"
+        )
+
         await db.ml_predictions.create(data=pred_data)
 
-        logger.debug(
-            f"📊 ML prediction saved to database: {pred_log.prediction} ({pred_log.confidence:.2%})"
+        logger.info(
+            f"✅ ML prediction saved to database: {pred_log.prediction} ({pred_log.confidence:.2%})"
         )
         return {"success": True, "message": "Prediction logged"}
     except Exception as e:
-        logger.error(f"Failed to log ML prediction: {e}")
+        logger.error(f"❌ Failed to log ML prediction: {e}", exc_info=True)
         return {"success": False, "message": str(e)}
 
 
