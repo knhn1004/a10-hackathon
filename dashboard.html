@@ -1474,8 +1474,16 @@
                     return;
                 }
                 
-                // Draw the most recent time series
-                const series = timeseries[timeseries.length - 1];
+                // Find the most recent time series based on latest timestamp (not array order)
+                const series = timeseries.reduce((latest, current) => {
+                    const latestTime = latest.timestamps && latest.timestamps.length > 0 
+                        ? Math.max(...latest.timestamps) 
+                        : 0;
+                    const currentTime = current.timestamps && current.timestamps.length > 0 
+                        ? Math.max(...current.timestamps) 
+                        : 0;
+                    return currentTime > latestTime ? current : latest;
+                }, timeseries[0]);
                 const timestamps = series.timestamps || [];
                 const confidences = series.confidences || [];
                 const predictions = series.predictions || [];
@@ -1527,10 +1535,10 @@
                 ctx.strokeStyle = '#7f1d1d';
                 ctx.lineWidth = 1;
                 ctx.setLineDash([5, 5]);
-                const threshold65 = (height - 30) * (1 - 0.65);
+                const threshold90 = (height - 30) * (1 - 0.90);
                 ctx.beginPath();
-                ctx.moveTo(padding, threshold65);
-                ctx.lineTo(width - padding, threshold65);
+                ctx.moveTo(padding, threshold90);
+                ctx.lineTo(width - padding, threshold90);
                 ctx.stroke();
                 ctx.setLineDash([]);
                 
@@ -1538,7 +1546,7 @@
                 ctx.fillStyle = '#7f1d1d';
                 ctx.font = '10px monospace';
                 ctx.textAlign = 'right';
-                ctx.fillText('65%', padding - 5, threshold65 + 3);
+                ctx.fillText('90%', padding - 5, threshold90 + 3);
                 
                 // Draw time axis labels
                 ctx.fillStyle = '#94a3b8';

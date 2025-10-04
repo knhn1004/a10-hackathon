@@ -982,8 +982,16 @@ async def get_mcp_request_history(
                                 "confidence": pred.confidence,
                                 "samples": pred.samples,
                                 "created_at": pred.createdAt.timestamp(),
+                                "mcp_request_id": pred.mcpRequestId,
                             }
+                            # IMPORTANT: Only include predictions that belong to THIS request
                             for pred in (cont.ml_predictions or [])
+                            if pred.mcpRequestId == req.id
+                            or (
+                                pred.mcpRequestId is None
+                                and cont.mcpRequestId == req.id
+                            )
+                            # Include if: 1) prediction's mcpRequestId matches, OR 2) prediction has no mcpRequestId but container belongs to this request
                         ],
                         "crashes": [
                             {
@@ -1487,11 +1495,8 @@ async def get_ml_predictions(
             order={"createdAt": "desc"},
             take=limit,
             include={
-                "container": {
-                    "include": {
-                        "mcp_requests": True,
-                    }
-                }
+                "container": True,
+                "mcp_requests": True,  # Direct relation to MCP request
             },
         )
 
@@ -1521,11 +1526,11 @@ async def get_ml_predictions(
                 ),
                 "mcp_request": (
                     {
-                        "tool": pred.container.mcp_requests.tool,
-                        "status": pred.container.mcp_requests.status,
-                        "created_at": pred.container.mcp_requests.createdAt.timestamp(),
+                        "tool": pred.mcp_requests.tool,
+                        "status": pred.mcp_requests.status,
+                        "created_at": pred.mcp_requests.createdAt.timestamp(),
                     }
-                    if pred.container and pred.container.mcp_requests
+                    if pred.mcp_requests
                     else None
                 ),
             }

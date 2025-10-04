@@ -93,11 +93,16 @@ After 8 samples collected (8 seconds)
     ├─ Memory trends
     ├─ Network activity
     ├─ Log pattern analysis
-    └─ Random Forest prediction
+    └─ PyTorch LSTM prediction
     ↓
-Prediction = "mining" AND confidence >= 85%?
+Mining probability >= 90%?
     ├─ YES → 🚨 Alert + Auto-kill (if enabled)
     └─ NO  → Continue monitoring
+    
+Note: The model returns:
+- predicted_class: "normal" or "mining" (whichever has higher probability)
+- mining_probability: Always the probability of mining (0-1)
+We alert based on mining_probability >= 90%, regardless of predicted_class
 ```
 
 ### Code Location (`monitor.py`):
@@ -121,8 +126,8 @@ async def _check_ml_mining(self, metrics: ContainerMetrics):
     features = self.ml_detector.extract_features(metrics_dicts, log_text)
     prediction, confidence = self.ml_detector.predict(features)
     
-    # Act on high-confidence predictions
-    if prediction == "mining" and confidence >= 0.85:
+    # Act on high mining probability (confidence = mining_prob)
+    if confidence >= 0.90:  # Alert if mining_prob >= 90%
         # Create alert
         alert = NetworkAlert(...)
         
@@ -172,7 +177,7 @@ CPU_MODERATE_DURATION = 30
 CPU_MODERATE_AUTO_KILL = False  # Currently disabled
 
 # ML detection
-ML_MINING_CONFIDENCE_THRESHOLD = 0.85  # 85% confidence
+ML_MINING_CONFIDENCE_THRESHOLD = 0.90  # 90% confidence
 ML_MINING_AUTO_KILL = False  # Currently disabled
 ML_MINING_MIN_SAMPLES = 8  # 8 seconds of data
 ```
@@ -223,7 +228,7 @@ ML_MINING_MIN_SAMPLES = 8  # 8 seconds of data
 │    • After 8 seconds:                                       │
 │      └─ Extract 19 features from time-series               │
 │      └─ Random Forest prediction                            │
-│      └─ If mining detected (85%+ conf):                    │
+│      └─ If mining detected (90%+ conf):                    │
 │          ├─ Create alert                                    │
 │          ├─ Log to network_alerts                           │
 │          └─ Kill container (if auto-kill enabled)          │
@@ -253,7 +258,7 @@ ML_MINING_MIN_SAMPLES = 8  # 8 seconds of data
 - ✅ **Active for**: All running sandbox containers
 - ✅ **Model loaded**: If `models/mining_detector.pkl` exists
 - ⚙️ **Sample requirement**: 8 seconds of metrics (8 samples)
-- ⚙️ **Confidence threshold**: 85% for action
+- ⚙️ **Confidence threshold**: 90% for action
 - ⚠️ **Auto-kill**: Currently **DISABLED** (all auto-kill flags = False)
 
 ### Auto-Kill Settings (monitor.py):

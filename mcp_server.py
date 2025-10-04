@@ -19,6 +19,7 @@ Best practices implemented:
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -964,46 +965,36 @@ current_session_id = str(uuid.uuid4())
 async def list_tools() -> list[Tool]:
     """List available tools."""
     tools = [
-        Tool(
-            name="create_sandbox",
-            description=(
-                "Create a new isolated Python code execution sandbox. "
-                "Each sandbox is a Docker container with resource limits. "
-                "IMPORTANT: Sandboxes are automatically deleted after code execution by default. "
-                "Set auto_cleanup=false in execute_python/execute_from_url to keep them alive. "
-                "Idle sandboxes auto-delete after 5 minutes."
-            ),
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
+        # Tool(
+        #     name="create_sandbox",
+        #     description=(
+        #         "Create a new isolated Python code execution sandbox. "
+        #         "Each sandbox is a Docker container with resource limits. "
+        #         "IMPORTANT: Sandboxes are automatically deleted after code execution by default. "
+        #         "Set auto_cleanup=false in execute_python/execute_from_url to keep them alive. "
+        #         "Idle sandboxes auto-delete after 5 minutes."
+        #     ),
+        #     inputSchema={"type": "object", "properties": {}, "required": []},
+        # ),
         Tool(
             name="execute_python",
             description=(
-                "Execute Python code in an existing sandbox. "
+                "Execute Python code in an isolated sandbox. "
+                "Automatically creates a new sandbox, executes your code, and cleans up afterwards. "
                 "The sandbox has numpy, pandas, matplotlib, and requests available. "
                 "Code execution is isolated and secure. "
                 "Returns stdout, stderr, and any matplotlib plots as base64 images. "
-                "CRITICAL: Unless you need to reuse the sandbox for multiple executions, "
-                "DO NOT set auto_cleanup=false. Leaving containers running wastes resources "
-                "and causes continuous ML monitoring. Default behavior (auto_cleanup=true or omitted) "
-                "automatically deletes the sandbox after execution."
+                "The sandbox is automatically deleted after execution to prevent resource waste."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "sandbox_id": {
-                        "type": "string",
-                        "description": "The ID of the sandbox to execute code in",
-                    },
                     "code": {
                         "type": "string",
                         "description": "The Python code to execute",
                     },
-                    "auto_cleanup": {
-                        "type": "boolean",
-                        "description": "Optional: Set to false ONLY if you need to reuse the sandbox for multiple executions. If omitted or true, sandbox is automatically deleted after execution to prevent resource waste.",
-                    },
                 },
-                "required": ["sandbox_id", "code"],
+                "required": ["code"],
             },
         ),
         Tool(
@@ -1035,31 +1026,23 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="execute_from_url",
             description=(
-                "Fetch Python code from a URL and execute it in a sandbox. "
+                "Fetch Python code from a URL and execute it in an isolated sandbox. "
+                "Automatically creates a new sandbox, downloads and executes code from the URL, then cleans up. "
                 "This tool will download code from the provided URL and run it in an isolated environment. "
                 "Useful for running code from GitHub gists, pastebin, or other code sharing services. "
                 "The URL must be publicly accessible (http/https). "
                 "Maximum code size: 1MB. "
-                "IMPORTANT: The sandbox is automatically deleted after execution by default (auto_cleanup=true). "
-                "Set auto_cleanup=false to keep the sandbox alive for reuse."
+                "The sandbox is automatically deleted after execution."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "sandbox_id": {
-                        "type": "string",
-                        "description": "The ID of the sandbox to execute code in",
-                    },
                     "url": {
                         "type": "string",
                         "description": "URL to fetch Python code from (must be http/https)",
                     },
-                    "auto_cleanup": {
-                        "type": "boolean",
-                        "description": "Optional: Set to false ONLY if you need to reuse the sandbox for multiple executions. If omitted or true, sandbox is automatically deleted after execution to prevent resource waste.",
-                    },
                 },
-                "required": ["sandbox_id", "url"],
+                "required": ["url"],
             },
         ),
     ]
@@ -1120,11 +1103,15 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     try:
         if name == "create_sandbox":
             result = await SandboxManager.create_sandbox(current_session_id)
+
+            # Return structured data with both human-readable and machine-parseable format
             result_text = (
                 f"✅ Sandbox created successfully!\n\n"
                 f"Sandbox ID: {result['sandbox_id']}\n"
+                f"Name: {result['name']}\n"
                 f"Status: {result['status']}\n\n"
-                f"You can now execute Python code using execute_python with this sandbox_id."
+                f"Use this sandbox_id with execute_python to run code.\n\n"
+                f"JSON: {json.dumps(result)}"
             )
 
             # Log request and get request_id for linking
@@ -1153,14 +1140,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=result_text)]
 
         elif name == "execute_python":
-            sandbox_id = arguments.get("sandbox_id")
             code = arguments.get("code")
-            auto_cleanup = arguments.get("auto_cleanup", True)
 
-            if not sandbox_id or not code:
-                result_text = "❌ Error: Both sandbox_id and code are required"
+            if not code:
+                result_text = "❌ Error: code is required"
                 await log_request(name, arguments, result_text, "error")
                 return [TextContent(type="text", text=result_text)]
+
+            # Auto-create sandbox for this execution
+            logger.info("🚀 Auto-creating sandbox for execute_python")
+            sandbox_result = await SandboxManager.create_sandbox(current_session_id)
+            sandbox_id = sandbox_result["sandbox_id"]
+            auto_cleanup = True  # Always cleanup after execution
 
             # Log request first to get request_id for linking LLM reviews
             request_id = await log_request(
@@ -1358,38 +1349,35 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=f"✅ {result['message']}")]
 
         elif name == "execute_from_url":
-            sandbox_id = arguments.get("sandbox_id")
             url = arguments.get("url")
-            auto_cleanup = arguments.get("auto_cleanup", True)
 
-            if not sandbox_id or not url:
+            if not url:
                 return [
                     TextContent(
                         type="text",
-                        text="❌ Error: Both sandbox_id and url are required",
+                        text="❌ Error: url is required",
                     )
                 ]
 
-            # Fetch code from URL
+            # Fetch code from URL first
             try:
                 fetch_result = await SandboxManager.fetch_code_from_url(url)
                 code = fetch_result["code"]
-
-                logger.info(
-                    f"Fetched {fetch_result['size']} bytes from {url}, executing in {sandbox_id}"
-                )
+                logger.info(f"Fetched {fetch_result['size']} bytes from {url}")
             except ValueError as e:
                 result_text = f"❌ Error fetching code from URL:\n{str(e)}"
-                log_request(
-                    name, {"sandbox_id": sandbox_id, "url": url}, result_text, "error"
-                )
+                log_request(name, {"url": url}, result_text, "error")
                 return [TextContent(type="text", text=result_text)]
             except Exception as e:
                 result_text = f"❌ Unexpected error fetching code:\n{str(e)}"
-                log_request(
-                    name, {"sandbox_id": sandbox_id, "url": url}, result_text, "error"
-                )
+                log_request(name, {"url": url}, result_text, "error")
                 return [TextContent(type="text", text=result_text)]
+
+            # Auto-create sandbox for this execution
+            logger.info("🚀 Auto-creating sandbox for execute_from_url")
+            sandbox_result = await SandboxManager.create_sandbox(current_session_id)
+            sandbox_id = sandbox_result["sandbox_id"]
+            auto_cleanup = True  # Always cleanup after execution
 
             # Execute the fetched code (will go through LLM filter if enabled)
             try:

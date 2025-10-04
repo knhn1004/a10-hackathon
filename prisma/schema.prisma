@@ -47,22 +47,23 @@ model api_tokens {
 
 // MCP requests are the central entity - each request can spawn containers, trigger LLM reviews, etc.
 model mcp_requests {
-  id            String         @id
-  userId        String
-  tool          String         // create_sandbox, execute_python, execute_from_url, etc.
-  status        String         // success, error, rejected, crashed
-  sandboxId     String?        // The sandbox/container ID if applicable
-  codeLength    Int?
-  url           String?
-  resultPreview String?
-  errorMessage  String?
-  executionTime Float?
-  createdAt     DateTime       @default(now())
+  id             String           @id
+  userId         String
+  tool           String           // create_sandbox, execute_python, execute_from_url, etc.
+  status         String           // success, error, rejected, crashed
+  sandboxId      String?          // The sandbox/container ID if applicable
+  codeLength     Int?
+  url            String?
+  resultPreview  String?
+  errorMessage   String?
+  executionTime  Float?
+  createdAt      DateTime         @default(now())
   
   // Relations
-  users         users          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  containers    containers[]   // All containers created by this request
-  llm_reviews   llm_reviews[]  // LLM reviews for this request
+  users          users            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  containers     containers[]     // All containers created by this request
+  llm_reviews    llm_reviews[]    // LLM reviews for this request
+  ml_predictions ml_predictions[] // ML predictions for this request
   
   @@index([userId])
   @@index([sandboxId])
@@ -164,20 +165,21 @@ model llm_reviews {
 
 // ML predictions - mining/suspicious activity detection linked to containers
 model ml_predictions {
-  id            String      @id
+  id            String        @id
   containerId   String
   containerName String
-  mcpRequestId  String?     // Link to the MCP request that triggered this
-  prediction    String      // normal, suspicious, mining
+  mcpRequestId  String?       // Link to the MCP request that triggered this
+  prediction    String        // normal, suspicious, mining
   confidence    Float
   samples       Int
   duration      Float
   features      Json
-  isFinal       Boolean     @default(false) // True if this is the final aggregated prediction
-  createdAt     DateTime    @default(now())
+  isFinal       Boolean       @default(false) // True if this is the final aggregated prediction
+  createdAt     DateTime      @default(now())
   
   // Relations
-  container     containers  @relation(fields: [containerId], references: [containerId], onDelete: Cascade)
+  container     containers    @relation(fields: [containerId], references: [containerId], onDelete: Cascade)
+  mcp_requests  mcp_requests? @relation(fields: [mcpRequestId], references: [id], onDelete: SetNull)
 
   @@index([containerId])
   @@index([mcpRequestId])

@@ -84,7 +84,7 @@ MINING_KEYWORDS = [
 MINING_PATTERN_THRESHOLD = 3  # Number of keywords to trigger suspicion
 
 # ML mining detection
-ML_MINING_CONFIDENCE_THRESHOLD = 0.65  # Lowered for demo (was 0.85)
+ML_MINING_CONFIDENCE_THRESHOLD = 0.90  # High threshold to reduce false positives
 ML_MINING_AUTO_KILL = False  # Disable auto-kill for ML-detected mining
 ML_MINING_MIN_SAMPLES = 8  # Lower for quicker demo-classifications
 
@@ -940,10 +940,10 @@ class ContainerMonitor:
             self.ml_time_series[container_id].confidences.append(confidence)
             self.ml_time_series[container_id].features_history.append(current_features)
 
-            # Log prediction
+            # Log prediction (confidence now represents mining_prob, not predicted class confidence)
             logger.info(
                 f"🧠 Temporal LSTM Prediction for {metrics.name}: {prediction} "
-                f"(confidence={confidence*100:.1f}%) | "
+                f"(mining_prob={confidence*100:.1f}%) | "
                 f"Sequence length={len(stats_sequence)}"
             )
 
@@ -985,17 +985,12 @@ class ContainerMonitor:
             # Also write to database via API
             asyncio.create_task(self._save_ml_prediction_to_db(ml_prediction_record))
 
-            # Act on high-confidence predictions
-            if (
-                prediction == "mining" and confidence >= ML_MINING_CONFIDENCE_THRESHOLD
-            ) or (prediction == "suspicious" and confidence >= 0.65):
-
-                severity = "critical" if prediction == "mining" else "high"
-                alert_type = (
-                    "ml_mining_detected"
-                    if prediction == "mining"
-                    else "ml_suspicious_detected"
-                )
+            # Act on high mining probability (confidence now represents mining_prob)
+            # Alert if mining probability exceeds threshold, regardless of predicted class
+            if confidence >= ML_MINING_CONFIDENCE_THRESHOLD:
+                # Determine severity based on how confident the model is about mining
+                severity = "critical" if confidence >= 0.95 else "high"
+                alert_type = "ml_mining_detected"
 
                 alert = NetworkAlert(
                     container_id=container_id,
@@ -1005,13 +1000,13 @@ class ContainerMonitor:
                     timestamp=current_time,
                     details={
                         "prediction": prediction,
-                        "confidence": round(confidence, 4),
+                        "mining_probability": round(confidence, 4),
                         "sequence_length": len(stats_sequence),
                         "model_type": "PyTorch_LSTM",
                     },
                     message=(
-                        f"🧠 Temporal LSTM {prediction.upper()} DETECTED: {metrics.name} "
-                        f"(confidence: {confidence*100:.1f}%) - "
+                        f"🧠 Temporal LSTM MINING DETECTED: {metrics.name} "
+                        f"(mining_prob: {confidence*100:.1f}%, predicted_class: {prediction}) - "
                         f"Sequence: {len(stats_sequence)} samples"
                     ),
                     auto_killed=False,
@@ -1024,7 +1019,7 @@ class ContainerMonitor:
                         alert.auto_killed = True
                         alert.message += " 🔪 Container TERMINATED."
                         logger.error(
-                            f"🔪 TERMINATED {metrics.name} - LSTM detected {prediction}"
+                            f"🔪 TERMINATED {metrics.name} - LSTM detected mining (prob: {confidence:.1%})"
                         )
                     except Exception as e:
                         logger.error(f"Failed to kill container: {e}")
@@ -1314,6 +1309,16 @@ class ContainerMonitor:
                 # Remove from tracked containers
                 if container_id in self.tracked_containers:
                     del self.tracked_containers[container_id]
+
+                # Remove from ML time series (wave graph data)
+                if container_id in self.ml_time_series:
+                    del self.ml_time_series[container_id]
+                    logger.debug(f"Removed ML time series for container {container_id}")
+
+                # Remove from stats sequences (temporal model data)
+                if container_id in self.container_stats_sequences:
+                    del self.container_stats_sequences[container_id]
+                    logger.debug(f"Removed stats sequence for container {container_id}")
 
     async def start_monitoring(self):
         """Start continuous monitoring loop."""
@@ -1667,7 +1672,7 @@ class ContainerMonitor:
                     "samples": prediction.samples,
                     "duration": duration,
                     "features": prediction.features,
-                    "is_final": False,  # Intermediate predictions
+                    "is_final": prediction.is_final,  # Use actual is_final value from prediction
                     "user_id_override": user_id,
                 },
             )
