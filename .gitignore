@@ -54,7 +54,6 @@ Thumbs.db
 
 # Prisma
 .prisma/
-prisma/migrations/
 
 # Node (for Prisma CLI)
 node_modules/
